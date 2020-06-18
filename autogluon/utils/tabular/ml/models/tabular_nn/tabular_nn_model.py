@@ -17,7 +17,7 @@ from gluoncv.utils import LRSequential, LRScheduler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, QuantileTransformer  # PowerTransformer
+from sklearn.preprocessing import StandardScaler, QuantileTransformer, FunctionTransformer  # PowerTransformer
 
 from ......core import Space
 from ......utils import try_import_mxboard
@@ -26,7 +26,7 @@ from ....utils.loaders import load_pkl
 from ..abstract.abstract_model import AbstractModel, fixedvals_from_searchspaces
 from ....utils.savers import save_pkl
 from ...constants import BINARY, MULTICLASS, REGRESSION, SOFTCLASS
-from ....metrics import log_loss
+from ....metrics import log_loss, roc_auc
 from .categorical_encoders import OneHotMergeRaresHandleUnknownEncoder, OrdinalMergeRaresHandleUnknownEncoder
 from .tabular_nn_dataset import TabularNNDataset
 from .embednet import EmbedNet
@@ -66,8 +66,8 @@ class TabularNeuralNetModel(AbstractModel):
     params_file_name = 'net.params' # Stores parameters of final network
     temp_file_name = 'temp_net.params' # Stores temporary network parameters (eg. during the course of training)
 
-    def __init__(self, path: str, name: str, problem_type: str, objective_func, stopping_metric=None, hyperparameters=None, features=None, **kwargs):
-        super().__init__(path=path, name=name, problem_type=problem_type, objective_func=objective_func, stopping_metric=stopping_metric, hyperparameters=hyperparameters, features=features, **kwargs)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         """
         TabularNeuralNetModel object.
 
@@ -80,7 +80,6 @@ class TabularNeuralNetModel(AbstractModel):
         hyperparameters (dict): various hyperparameters for neural network and the NN-specific data processing
         features (list): List of predictive features to use, other features are ignored by the model.
         """
-        self.eval_metric_name = self.stopping_metric.name
         self.feature_types_metadata = None
         self.types_of_features = None
         self.feature_arraycol_map = None
@@ -96,6 +95,10 @@ class TabularNeuralNetModel(AbstractModel):
         self._architecture_desc = None
         self.optimizer = None
         self.verbosity = None
+        if self.stopping_metric is not None and self.objective_func == roc_auc and self.stopping_metric == log_loss:
+            self.stopping_metric = roc_auc  # NN is overconfident so early stopping with logloss can halt training too quick
+
+        self.eval_metric_name = self.stopping_metric.name
 
     def _set_default_params(self):
         """ Specifies hyperparameter values to use by default """
@@ -380,7 +383,7 @@ class TabularNeuralNetModel(AbstractModel):
         self.params_trained['num_epochs'] = best_val_epoch
         return
 
-    def predict_proba(self, X, preprocess=True):
+    def _predict_proba(self, X, preprocess=True):
         """ To align predict wiht abstract_model API.
             Preprocess here only refers to feature processing stesp done by all AbstractModel objects,
             not tabularNN-specific preprocessing steps.
@@ -426,25 +429,11 @@ class TabularNeuralNetModel(AbstractModel):
             preds[i:(i+batch_size)] = preds_batch
             i = i+batch_size
         if self.problem_type == REGRESSION or not predict_proba:
-            return preds.asnumpy().flatten() # return 1D numpy array
+            return preds.asnumpy().flatten()  # return 1D numpy array
         elif self.problem_type == BINARY and predict_proba:
-            preds = preds[:,1].asnumpy() # for binary problems, only return P(Y==+1)
-            if self.stopping_metric == log_loss or self.objective_func == log_loss:
-                # Ensure nonzero predicted probabilities under log-loss:
-                min_pred = 0.0
-                max_pred = 1.0
-                preds =  EPS + ((1 - 2*EPS)/(max_pred - min_pred)) * (preds - min_pred)
-            return preds
-        elif (predict_proba and (self.problem_type == MULTICLASS or self.problem_type == SOFTCLASS) and
-              (self.stopping_metric == log_loss or self.objective_func == log_loss)):
-            # Ensure nonzero predicted probabilities under log-loss:
-            preds = preds.asnumpy()
-            most_negative_rowvals = np.clip(np.min(preds, axis=1), a_min=None, a_max=0)
-            preds = preds - most_negative_rowvals[:,None] # ensure nonnegative rows
-            preds = np.clip(preds, a_min = EPS, a_max = None) # ensure no zeros
-            return preds / preds.sum(axis=1, keepdims=1) # renormalize
+            return preds[:,1].asnumpy()  # for binary problems, only return P(Y==+1)
 
-        return preds.asnumpy() # return 2D numpy array
+        return preds.asnumpy()  # return 2D numpy array
 
     def generate_datasets(self, X_train, y_train, params, X_test=None, y_test=None):
         impute_strategy = params['proc.impute_strategy']
@@ -491,7 +480,6 @@ class TabularNeuralNetModel(AbstractModel):
         if (self.processor is None or self.types_of_features is None
            or self.feature_arraycol_map is None or self.feature_type_map is None):
             raise ValueError("Need to process training data before test data")
-        df = self.ensure_onehot_object(df)
         df = self.processor.transform(df) # 2D numpy array. self.feature_arraycol_map, self.feature_type_map have been previously set while processing training data.
         return TabularNNDataset(df, self.feature_arraycol_map, self.feature_type_map,
                                 batch_size=batch_size, num_dataloading_workers=num_dataloading_workers,
@@ -520,7 +508,6 @@ class TabularNeuralNetModel(AbstractModel):
         logger.log(15, "AutoGluon Neural Network infers features are of the following types:")
         logger.log(15, json.dumps(self.types_of_features, indent=4))
         logger.log(15, "\n")
-        df = self.ensure_onehot_object(df)
         self.processor = self._create_preprocessor(impute_strategy=impute_strategy, max_category_levels=max_category_levels)
         df = self.processor.fit_transform(df) # 2D numpy array
         self.feature_arraycol_map = self._get_feature_arraycol_map(max_category_levels=max_category_levels) # OrderedDict of feature-name -> list of column-indices in df corresponding to this feature
@@ -570,15 +557,9 @@ class TabularNeuralNetModel(AbstractModel):
             raise ValueError("Unknown optimizer specified: %s" % params['optimizer'])
         return optimizer
 
-    def ensure_onehot_object(self, df):
-        """ Converts all numerical one-hot columns to object-dtype.
-            Note: self.types_of_features must already exist!
-        """
-        new_df = df.copy() # To avoid SettingWithCopyWarning
-        for feature in self.types_of_features['onehot']:
-            if df[feature].dtype != 'object':
-                new_df.loc[:,feature] = df.loc[:,feature].astype(str)
-        return new_df
+    @staticmethod
+    def convert_df_dtype_to_str(df):
+        return df.astype(str)
 
     def __get_feature_type_if_present(self, feature_type):
         """ Returns crude categorization of feature types """
@@ -703,6 +684,8 @@ class TabularNeuralNetModel(AbstractModel):
             transformers.append( ('skewed', power_transformer, skewed_features) )
         if len(onehot_features) > 0:
             onehot_transformer = Pipeline(steps=[
+                # TODO: Consider avoiding converting to string for improved memory efficiency
+                ('to_str', FunctionTransformer(self.convert_df_dtype_to_str)),
                 ('imputer', SimpleImputer(strategy='constant', fill_value=self.unique_category_str)),
                 ('onehot', OneHotMergeRaresHandleUnknownEncoder(max_levels=max_category_levels, sparse=False))]) # test-time unknown values will be encoded as all zeros vector
             transformers.append( ('onehot', onehot_transformer, onehot_features) )

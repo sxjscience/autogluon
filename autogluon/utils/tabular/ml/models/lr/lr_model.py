@@ -18,11 +18,9 @@ logger = logging.getLogger(__name__)
 
 
 class LinearModel(AbstractModel):
-
-    def __init__(self, path: str, name: str, problem_type: str, objective_func, hyperparameters=None, features=None, feature_types_metadata=None, debug=0, **kwargs):
-        self.model_class, self.penalty, self.handle_text = get_model_params(problem_type, hyperparameters)
-        super().__init__(path=path, name=name, problem_type=problem_type, objective_func=objective_func, hyperparameters=hyperparameters, features=features, feature_types_metadata=feature_types_metadata, debug=debug, **kwargs)
-
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model_class, self.penalty, self.handle_text = get_model_params(self.problem_type, self.params)
         self.types_of_features = None
         self.pipeline = None
 
@@ -140,9 +138,9 @@ class LinearModel(AbstractModel):
 
         self.model = model.fit(X_train, Y_train)
 
-    def predict_proba(self, X, preprocess=True):
+    def _predict_proba(self, X, preprocess=True):
         X = self.preprocess(X, is_train=False, model_specific_preprocessing=True)
-        return super().predict_proba(X, preprocess=False)
+        return super()._predict_proba(X, preprocess=False)
 
     def hyperparameter_tune(self, X_train, X_test, Y_train, Y_test, scheduler_options=None, **kwargs):
         self.fit(X_train=X_train, X_test=X_test, Y_train=Y_train, Y_test=Y_test, **kwargs)

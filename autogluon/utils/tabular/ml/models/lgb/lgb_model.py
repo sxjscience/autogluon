@@ -22,17 +22,16 @@ from ....utils.savers import save_pkl
 from .....try_import import try_import_lightgbm
 from ......core import Int, Space
 
+
 warnings.filterwarnings("ignore", category=UserWarning, message="Starting from version")  # lightGBM brew libomp warning
 logger = logging.getLogger(__name__)
 
 
 # TODO: Save dataset to binary and reload for HPO. This will avoid the memory spike overhead when training each model and instead it will only occur once upon saving the dataset.
 class LGBModel(AbstractModel):
-    def __init__(self, path: str, name: str, problem_type: str, objective_func, stopping_metric=None, num_classes=None, hyperparameters=None, features=None, debug=0, **kwargs):
-        super().__init__(path=path, name=name, problem_type=problem_type, objective_func=objective_func, stopping_metric=stopping_metric, num_classes=num_classes, hyperparameters=hyperparameters, features=features, debug=debug, **kwargs)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
-        self.eval_metric_name = self.stopping_metric.name
-        self.is_higher_better = True
         self._internal_feature_map = None
 
     def _set_default_params(self):
@@ -43,8 +42,15 @@ class LGBModel(AbstractModel):
     def _get_default_searchspace(self):
         return get_default_searchspace(problem_type=self.problem_type, num_classes=self.num_classes)
 
+    # Use specialized LightGBM metric if available (fast), otherwise use custom func generator
     def get_eval_metric(self):
-        return lgb_utils.func_generator(metric=self.stopping_metric, is_higher_better=True, needs_pred_proba=not self.stopping_metric_needs_y_pred, problem_type=self.problem_type)
+        eval_metric = lgb_utils.convert_ag_metric_to_lgbm(ag_metric_name=self.stopping_metric.name, problem_type=self.problem_type)
+        if eval_metric is None:
+            eval_metric = lgb_utils.func_generator(metric=self.stopping_metric, is_higher_better=True, needs_pred_proba=not self.stopping_metric_needs_y_pred, problem_type=self.problem_type)
+            eval_metric_name = self.stopping_metric.name
+        else:
+            eval_metric_name = eval_metric
+        return eval_metric, eval_metric_name
 
     def fit(self, X_train=None, Y_train=None, X_test=None, Y_test=None, dataset_train=None, dataset_val=None, time_limit=None, **kwargs):
         start_time = time.time()
@@ -63,7 +69,7 @@ class LGBModel(AbstractModel):
         else:
             verbose_eval = 1
 
-        eval_metric = self.get_eval_metric()
+        eval_metric, eval_metric_name = self.get_eval_metric()
         dataset_train, dataset_val = self.generate_datasets(X_train=X_train, Y_train=Y_train, params=params, X_test=X_test, Y_test=Y_test, dataset_train=dataset_train, dataset_val=dataset_val)
         gc.collect()
 
@@ -90,9 +96,14 @@ class LGBModel(AbstractModel):
         if dataset_val is not None:
             reporter = kwargs.get('reporter', None)
             train_loss_name = self._get_train_loss_name() if reporter is not None else None
+            if train_loss_name is not None:
+                if 'metric' not in params or params['metric'] == '':
+                    params['metric'] = train_loss_name
+                elif train_loss_name not in params['metric']:
+                    params['metric'] = f'{params["metric"]},{train_loss_name}'
             callbacks += [
                 # Note: Don't use self.params_aux['max_memory_usage_ratio'] here as LightGBM handles memory per iteration optimally.  # TODO: Consider using when ratio < 1.
-                early_stopping_custom(early_stopping_rounds, metrics_to_use=[('valid_set', self.eval_metric_name)], max_diff=None, start_time=start_time, time_limit=time_limit,
+                early_stopping_custom(early_stopping_rounds, metrics_to_use=[('valid_set', eval_metric_name)], max_diff=None, start_time=start_time, time_limit=time_limit,
                                       ignore_dart_warning=True, verbose=False, manual_stop_file=False, reporter=reporter, train_loss_name=train_loss_name),
             ]
             valid_names = ['valid_set'] + valid_names
@@ -110,6 +121,11 @@ class LGBModel(AbstractModel):
         }
         if not isinstance(eval_metric, str):
             train_params['feval'] = eval_metric
+        else:
+            if 'metric' not in train_params['params'] or train_params['params']['metric'] == '':
+                train_params['params']['metric'] = eval_metric
+            elif eval_metric not in train_params['params']['metric']:
+                train_params['params']['metric'] = f'{train_params["params"]["metric"]},{eval_metric}'
         if seed_val is not None:
             train_params['params']['seed'] = seed_val
             random.seed(seed_val)
@@ -121,7 +137,7 @@ class LGBModel(AbstractModel):
         self.model = lgb.train(**train_params)
         self.params_trained['num_boost_round'] = self.model.best_iteration
 
-    def predict_proba(self, X, preprocess=True):
+    def _predict_proba(self, X, preprocess=True):
         if preprocess:
             X = self.preprocess(X)
         if self.problem_type == REGRESSION:

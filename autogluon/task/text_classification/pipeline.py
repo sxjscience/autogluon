@@ -12,10 +12,7 @@ from mxnet import gluon, init, autograd, nd
 from mxnet.gluon import nn
 from ...utils.try_import import try_import_gluonnlp
 
-nlp = try_import_gluonnlp()
-nlp.utils.check_version('0.8.1')
 
-from gluonnlp.data import BERTTokenizer
 from .network import get_network
 from .dataset import *
 from .transforms import BERTDatasetTransform
@@ -29,7 +26,7 @@ __all__ = ['train_text_classification', 'preprocess_data']
 def preprocess_data(tokenizer, task, batch_size, dev_batch_size, max_len, vocab, pad=False, num_workers=1):
     """Train/eval Data preparation function."""
     pool = multiprocessing.Pool()
-
+    nlp = try_import_gluonnlp()
     # transformation for data train and dev
     label_dtype = 'float32' if not task.class_labels else 'int32'
     trans = BERTDatasetTransform(tokenizer, max_len,
@@ -109,6 +106,7 @@ def preprocess_data(tokenizer, task, batch_size, dev_batch_size, max_len, vocab,
 def train_text_classification(args, reporter=None):
     # Step 1: add scripts every function and python objects in the original training script except for the training function
     # at the beginning of the decorated function
+    nlp = try_import_gluonnlp()
     logger = logging.getLogger(__name__)
     if args.verbose:
         logger.setLevel(logging.INFO)
@@ -193,7 +191,7 @@ def train_text_classification(args, reporter=None):
     if use_roberta:
         bert_tokenizer = nlp.data.GPT2BPETokenizer()
     else:
-        bert_tokenizer = BERTTokenizer(vocabulary, lower=do_lower_case)
+        bert_tokenizer = nlp.data.BERTTokenizer(vocabulary, lower=do_lower_case)
 
 
     # Get the loader.

@@ -7,10 +7,6 @@ from collections import OrderedDict
 import mxnet as mx
 import matplotlib.pyplot as plt
 from ...utils.try_import import try_import_gluonnlp
-
-nlp = try_import_gluonnlp()
-nlp.utils.check_version('0.8.1')
-
 from ...utils import *
 from .network import *
 from .pipeline import *
@@ -106,6 +102,7 @@ class TextClassificationPredictor(Classifier):
         dataset = dataset.transform(self.transform)
         vocab = self.transform.vocab
         pad_val = vocab[vocab.padding_token]
+        nlp = try_import_gluonnlp()
         batchify_fn = nlp.data.batchify.Tuple(
             nlp.data.batchify.Pad(axis=0, pad_val=pad_val),  # input
             nlp.data.batchify.Stack(),  # length
