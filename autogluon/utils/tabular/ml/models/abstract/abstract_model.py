@@ -5,15 +5,19 @@ import os
 import pickle
 import sys
 import time
+from typing import Union
 
+import numpy as np
 import pandas as pd
 import psutil
 
 from .model_trial import model_trial
 from ...constants import AG_ARGS_FIT, BINARY, REGRESSION, REFIT_FULL_SUFFIX, OBJECTIVES_TO_NORMALIZE
 from ...tuning.feature_pruner import FeaturePruner
-from ...utils import get_pred_from_proba, generate_train_test_split, shuffle_df_rows, convert_categorical_to_int, normalize_pred_probas
+from ...utils import get_pred_from_proba, generate_train_test_split, shuffle_df_rows, convert_categorical_to_int, normalize_pred_probas, infer_eval_metric
 from .... import metrics
+from ....features.feature_types_metadata import FeatureTypesMetadata
+from ....utils.exceptions import TimeLimitExceeded, NoValidFeatures
 from ....utils.loaders import load_pkl
 from ....utils.savers import save_pkl, save_json
 from ......core import Space, Categorical, List, NestedSpace
@@ -57,12 +61,15 @@ class AbstractModel:
     model_info_name = 'info.pkl'
     model_info_json_name = 'info.json'
 
-    def __init__(self, path: str, name: str, problem_type: str, objective_func, num_classes=None, stopping_metric=None, model=None, hyperparameters=None, features=None, feature_types_metadata=None, debug=0, **kwargs):
+    def __init__(self, path: str, name: str, problem_type: str, eval_metric: Union[str, metrics.Scorer] = None, num_classes=None, stopping_metric=None, model=None, hyperparameters=None, features=None, feature_types_metadata: FeatureTypesMetadata = None, debug=0, **kwargs):
         """ Creates a new model.
             Args:
-                path (str): directory where to store all outputs
-                name (str): name of subdirectory inside path where model will be saved
-                hyperparameters (dict): various hyperparameters that will be used by model (can be search spaces instead of fixed values)
+                path (str): directory where to store all outputs.
+                name (str): name of subdirectory inside path where model will be saved.
+                problem_type (str): type of problem this model will handle. Valid options: ['binary', 'multiclass', 'regression'].
+                eval_metric (str or autogluon.utils.tabular.metrics.Scorer): objective function the model intends to optimize. If None, will be inferred based on problem_type.
+                hyperparameters (dict): various hyperparameters that will be used by model (can be search spaces instead of fixed values).
+                feature_types_metadata (autogluon.utils.tabular.features.feature_types_metadata.FeatureTypesMetadata): contains feature type information that can be used to identify special features such as text ngrams and datetime.
         """
         self.name = name
         self.path_root = path
@@ -71,22 +78,26 @@ class AbstractModel:
         self.num_classes = num_classes
         self.model = model
         self.problem_type = problem_type
-        self.objective_func = objective_func  # Note: we require higher values = better performance
+        if eval_metric is not None:
+            self.eval_metric = metrics.get_metric(eval_metric, self.problem_type, 'eval_metric')  # Note: we require higher values = better performance
+        else:
+            self.eval_metric = infer_eval_metric(problem_type=self.problem_type)
+            logger.log(20, f"Model {self.name}'s eval_metric inferred to be '{self.eval_metric.name}' because problem_type='{self.problem_type}' and eval_metric was not specified during init.")
 
         if stopping_metric is None:
-            self.stopping_metric = self.objective_func
+            self.stopping_metric = self.eval_metric
         else:
             self.stopping_metric = stopping_metric
 
-        if self.objective_func.name in OBJECTIVES_TO_NORMALIZE:
+        if self.eval_metric.name in OBJECTIVES_TO_NORMALIZE:
             self.normalize_pred_probas = True
-            logger.debug(self.name+" predicted probabilities will be transformed to never =0 since eval_metric="+self.objective_func.name)
+            logger.debug(self.name +" predicted probabilities will be transformed to never =0 since eval_metric=" + self.eval_metric.name)
         else:
             self.normalize_pred_probas = False
 
-        if isinstance(self.objective_func, metrics._ProbaScorer):
+        if isinstance(self.eval_metric, metrics._ProbaScorer):
             self.metric_needs_y_pred = False
-        elif isinstance(self.objective_func, metrics._ThresholdScorer):
+        elif isinstance(self.eval_metric, metrics._ThresholdScorer):
             self.metric_needs_y_pred = False
         else:
             self.metric_needs_y_pred = True
@@ -144,12 +155,17 @@ class AbstractModel:
             # TODO: Add more params
             # max_memory_usage=None,
             # max_disk_usage=None,
-            # max_time_limit_ratio=1.0,
-            # max_time_limit=None,
+            max_time_limit_ratio=1.0,  # ratio of given time_limit to use during fit(). If time_limit == 10 and max_time_limit_ratio=0.3, time_limit would be changed to 3.
+            max_time_limit=None,  # max time_limit value during fit(). If the provided time_limit is greater than this value, it will be replaced by max_time_limit. Occurs after max_time_limit_ratio is applied.
+            min_time_limit=0,  # min time_limit value during fit(). If the provided time_limit is less than this value, it will be replaced by min_time_limit. Occurs after max_time_limit is applied.
             # num_cpu=None,
             # num_gpu=None,
             # ignore_hpo=False,
             # max_early_stopping_rounds=None,
+            # use_orig_features=True,  # TODO: Only for stackers
+            # TODO: add option for only top-k ngrams
+            ignored_feature_types_special=[],  # List, drops any features in `self.feature_types_metadata.feature_types_special[type]` for type in `ignored_feature_types_special`. | Currently undocumented in task.
+            ignored_feature_types_raw=[],  # List, drops any features in `self.feature_types_metadata.feature_types_raw[type]` for type in `ignored_feature_types_raw`. | Currently undocumented in task.
         )
         for key, value in default_auxiliary_params.items():
             self._set_default_param_value(key, value, params=self.params_aux)
@@ -161,7 +177,15 @@ class AbstractModel:
             params[param_name] = param_value
 
     def _get_default_searchspace(self) -> dict:
-        return NotImplementedError
+        """
+        Get the default hyperparameter searchspace of the model.
+        See `autogluon.core.space` for available space classes.
+
+        Returns
+        -------
+        dict of hyperparameter search spaces.
+        """
+        return {}
 
     def _set_default_searchspace(self):
         """ Sets up default search space for HPO. Each hyperparameter which user did not specify is converted from
@@ -201,12 +225,52 @@ class AbstractModel:
                 return X[self.features]
         else:
             self.features = list(X.columns)  # TODO: add fit and transform versions of preprocess instead of doing this
+            ignored_feature_types_raw = self.params_aux.get('ignored_feature_types_raw', [])
+            if ignored_feature_types_raw:
+                for ignored_feature_type in ignored_feature_types_raw:
+                    self.features = [feature for feature in self.features if feature not in self.feature_types_metadata.feature_types_raw[ignored_feature_type]]
+            ignored_feature_types_special = self.params_aux.get('ignored_feature_types_special', [])
+            if ignored_feature_types_special:
+                for ignored_feature_type in ignored_feature_types_special:
+                    self.features = [feature for feature in self.features if feature not in self.feature_types_metadata.feature_types_special[ignored_feature_type]]
+            if not self.features:
+                raise NoValidFeatures
+            if ignored_feature_types_raw or ignored_feature_types_special:
+                if list(X.columns) != self.features:
+                    X = X[self.features]
         return X
 
-    def fit(self, X_train, Y_train, **kwargs):
+    def _preprocess_fit_args(self, **kwargs):
+        time_limit = kwargs.get('time_limit', None)
+        max_time_limit_ratio = self.params_aux.get('max_time_limit_ratio', 1)
+        if time_limit is not None:
+            time_limit *= max_time_limit_ratio
+        max_time_limit = self.params_aux.get('max_time_limit', None)
+        if max_time_limit is not None:
+            if time_limit is None:
+                time_limit = max_time_limit
+            else:
+                time_limit = min(time_limit, max_time_limit)
+        min_time_limit = self.params_aux.get('min_time_limit', 0)
+        if min_time_limit is None:
+            time_limit = min_time_limit
+        elif time_limit is not None:
+            time_limit = max(time_limit, min_time_limit)
+        kwargs['time_limit'] = time_limit
+        return kwargs
+
+    def fit(self, **kwargs):
+        kwargs = self._preprocess_fit_args(**kwargs)
+        if 'time_limit' not in kwargs or kwargs['time_limit'] is None or kwargs['time_limit'] > 0:
+            self._fit(**kwargs)
+        else:
+            logger.warning(f'\tWarning: Model has no time left to train, skipping model... (Time Left = {round(kwargs["time_limit"], 1)}s)')
+            raise TimeLimitExceeded
+
+    def _fit(self, X_train, y_train, **kwargs):
         # kwargs may contain: num_cpus, num_gpus
         X_train = self.preprocess(X_train)
-        self.model = self.model.fit(X_train, Y_train)
+        self.model = self.model.fit(X_train, y_train)
 
     def predict(self, X, preprocess=True):
         y_pred_proba = self.predict_proba(X, preprocess=preprocess)
@@ -219,6 +283,7 @@ class AbstractModel:
         y_pred_proba = self._predict_proba(X=X, preprocess=preprocess)
         if normalize:
             y_pred_proba = normalize_pred_probas(y_pred_proba, self.problem_type)
+        y_pred_proba = y_pred_proba.astype(np.float32)
         return y_pred_proba
 
     def _predict_proba(self, X, preprocess=True):
@@ -243,7 +308,7 @@ class AbstractModel:
 
     def score(self, X, y, eval_metric=None, metric_needs_y_pred=None, preprocess=True):
         if eval_metric is None:
-            eval_metric = self.objective_func
+            eval_metric = self.eval_metric
         if metric_needs_y_pred is None:
             metric_needs_y_pred = self.metric_needs_y_pred
         if metric_needs_y_pred:
@@ -255,7 +320,7 @@ class AbstractModel:
 
     def score_with_y_pred_proba(self, y, y_pred_proba, eval_metric=None, metric_needs_y_pred=None):
         if eval_metric is None:
-            eval_metric = self.objective_func
+            eval_metric = self.eval_metric
         if metric_needs_y_pred is None:
             metric_needs_y_pred = self.metric_needs_y_pred
         if metric_needs_y_pred:
@@ -283,8 +348,12 @@ class AbstractModel:
             return obj
 
     # TODO: Consider disabling feature pruning when num_features is high (>1000 for example), or using a faster feature importance calculation method
-    def compute_feature_importance(self, X, y, features_to_use=None, preprocess=True, subsample_size=10000, silent=False, **kwargs):
+    def compute_feature_importance(self, X, y, features_to_use=None, preprocess=True, subsample_size=10000, silent=False, **kwargs) -> pd.Series:
         if (subsample_size is not None) and (len(X) > subsample_size):
+            # Reset index to avoid error if duplicated indices.
+            X = X.reset_index(drop=True)
+            y = y.reset_index(drop=True)
+
             X = X.sample(subsample_size, random_state=0)
             y = y.loc[X.index]
         else:
@@ -336,7 +405,7 @@ class AbstractModel:
             time_estimated = (feature_count + 1) * time_score + time_start_score - time_start
             logger.log(20, f'\t{round(time_estimated, 2)}s\t= Expected runtime')
 
-        X_test_shuffled = shuffle_df_rows(X=X, seed=0)
+        X_shuffled = shuffle_df_rows(X=X, seed=0)
         row_count = X.shape[0]
 
         # calculating maximum number of features, which is safe to process parallel
@@ -352,41 +421,41 @@ class AbstractModel:
         compute_count = min(compute_count, feature_count)
 
         # creating copy of original data N=compute_count times for parallel processing
-        X_test_raw = pd.concat([X.copy() for _ in range(compute_count)], ignore_index=True, sort=False).reset_index(drop=True)
+        X_raw = pd.concat([X.copy() for _ in range(compute_count)], ignore_index=True, sort=False).reset_index(drop=True)
 
         #  TODO: Make this faster by multi-threading?
         permutation_importance_dict = {}
         for i in range(0, feature_count, compute_count):
             parallel_computed_features = features[i:i + compute_count]
 
-            # if final iteration, leaving only necessary part of X_test_raw
+            # if final iteration, leaving only necessary part of X_raw
             num_features_processing = len(parallel_computed_features)
             final_iteration = i + num_features_processing == feature_count
             if (num_features_processing < compute_count) and final_iteration:
-                X_test_raw = X_test_raw.loc[:row_count * num_features_processing - 1]
+                X_raw = X_raw.loc[:row_count * num_features_processing - 1]
 
             row_index = 0
             for feature in parallel_computed_features:
                 row_index_end = row_index + row_count
-                X_test_raw.loc[row_index:row_index_end - 1, feature] = X_test_shuffled[feature].values
+                X_raw.loc[row_index:row_index_end - 1, feature] = X_shuffled[feature].values
                 row_index = row_index_end
 
             if self.metric_needs_y_pred:
-                Y_pred = self.predict(X_test_raw, preprocess=False)
+                y_pred = self.predict(X_raw, preprocess=False)
             else:
-                Y_pred = self.predict_proba(X_test_raw, preprocess=False)
+                y_pred = self.predict_proba(X_raw, preprocess=False)
 
             row_index = 0
             for feature in parallel_computed_features:
                 # calculating importance score for given feature
                 row_index_end = row_index + row_count
-                Y_pred_cur = Y_pred[row_index:row_index_end]
-                score = self.objective_func(y, Y_pred_cur)
+                y_pred_cur = y_pred[row_index:row_index_end]
+                score = self.eval_metric(y, y_pred_cur)
                 permutation_importance_dict[feature] = model_score_base - score
 
                 if not final_iteration:
                     # resetting to original values for processed feature
-                    X_test_raw.loc[row_index:row_index_end - 1, feature] = X[feature].values
+                    X_raw.loc[row_index:row_index_end - 1, feature] = X[feature].values
 
                 row_index = row_index_end
 
@@ -423,7 +492,7 @@ class AbstractModel:
         template.set_contexts(self.path_root + template.name + os.path.sep)
         return template
 
-    def hyperparameter_tune(self, X_train, X_test, Y_train, Y_test, scheduler_options, **kwargs):
+    def hyperparameter_tune(self, X_train, y_train, X_val, y_val, scheduler_options, **kwargs):
         # verbosity = kwargs.get('verbosity', 2)
         time_start = time.time()
         logger.log(15, "Starting generic AbstractModel hyperparameter tuning for %s model..." % self.name)
@@ -438,11 +507,11 @@ class AbstractModel:
         params_copy['num_gpus'] = scheduler_options['resource'].get('num_gpus', None)
         dataset_train_filename = 'dataset_train.p'
         train_path = directory + dataset_train_filename
-        save_pkl.save(path=train_path, object=(X_train, Y_train))
+        save_pkl.save(path=train_path, object=(X_train, y_train))
 
         dataset_val_filename = 'dataset_val.p'
         val_path = directory + dataset_val_filename
-        save_pkl.save(path=val_path, object=(X_test, Y_test))
+        save_pkl.save(path=val_path, object=(X_val, y_val))
 
         if not any(isinstance(params_copy[hyperparam], Space) for hyperparam in params_copy):
             logger.warning("Attempting to do hyperparameter optimization without any search space (all hyperparameters are already fixed values)")
@@ -511,10 +580,10 @@ class AbstractModel:
         logger.log(15, str(best_hp))
         return hpo_models, hpo_model_performances, hpo_results
 
-    def feature_prune(self, X_train, X_holdout, Y_train, Y_holdout):
+    def feature_prune(self, X_train, X_holdout, y_train, y_holdout):
         feature_pruner = FeaturePruner(model_base=self)
-        X_train, X_test, y_train, y_test = generate_train_test_split(X_train, Y_train, problem_type=self.problem_type, test_size=0.2)
-        feature_pruner.tune(X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test, X_holdout=X_holdout, y_holdout=Y_holdout)
+        X_train, X_val, y_train, y_val = generate_train_test_split(X_train, y_train, problem_type=self.problem_type, test_size=0.2)
+        feature_pruner.tune(X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val, X_holdout=X_holdout, y_holdout=y_holdout)
         features_to_keep = feature_pruner.features_in_iter[feature_pruner.best_iteration]
         logger.debug(str(features_to_keep))
         self.features = features_to_keep
@@ -567,7 +636,7 @@ class AbstractModel:
             name=self.name,
             model_type=type(self).__name__,
             problem_type=self.problem_type,
-            eval_metric=self.objective_func.name,
+            eval_metric=self.eval_metric.name,
             stopping_metric=self.stopping_metric.name,
             fit_time=self.fit_time,
             predict_time=self.predict_time,
@@ -575,6 +644,9 @@ class AbstractModel:
             hyperparameters=self.params,
             hyperparameters_fit=self.params_trained,  # TODO: Explain in docs that this is for hyperparameters that differ in final model from original hyperparameters, such as epochs (from early stopping)
             hyperparameters_nondefault=self.nondefault_params,
+            AG_args_fit=self.params_aux,
+            num_features=len(self.features) if self.features else None,
+            features=self.features,
             # disk_size=self.get_disk_size(),
             memory_size=self.get_memory_size(),  # Memory usage of model in bytes
         )

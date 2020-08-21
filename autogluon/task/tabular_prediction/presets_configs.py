@@ -5,8 +5,9 @@ import functools
 def unpack(g):
     def _unpack_inner(f):
         @functools.wraps(f)
-        def _call(**kwargs):
-            return f(**g(**kwargs))
+        def _call(*args, **kwargs):
+            gargs, gkwargs = g(*args, **kwargs)
+            return f(*gargs, **gkwargs)
         return _call
     return _unpack_inner
 
@@ -42,13 +43,13 @@ preset_dict = dict(
 
     # Disables automated feature generation when text features are detected.
     # This is useful to determine how beneficial text features are to the end result, as well as to ensure features are not mistaken for text when they are not.
-    ignore_text={'feature_generator_kwargs': {'enable_nlp_vectorizer_features': False, 'enable_nlp_ratio_features': False}},
+    ignore_text={'feature_generator_kwargs': {'enable_text_ngram_features': False, 'enable_text_special_features': False}},
 
     # TODO: Consider HPO-enabled configs if training time doesn't matter but inference latency does.
 )
 
 
-def set_presets(**kwargs):
+def set_presets(*args, **kwargs):
     if 'presets' in kwargs:
         presets = kwargs['presets']
         if presets is None:
@@ -70,4 +71,4 @@ def set_presets(**kwargs):
         for key in preset_kwargs:
             if key not in kwargs:
                 kwargs[key] = preset_kwargs[key]
-    return kwargs
+    return args, kwargs

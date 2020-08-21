@@ -10,6 +10,7 @@ from pandas import DataFrame, Series
 from sklearn.model_selection import KFold, StratifiedKFold, RepeatedKFold, RepeatedStratifiedKFold, train_test_split
 
 from .constants import BINARY, REGRESSION, MULTICLASS, SOFTCLASS
+from ..metrics import accuracy, root_mean_squared_error, Scorer
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,14 @@ def setup_outputdir(output_directory):
         utcnow = datetime.utcnow()
         timestamp = utcnow.strftime("%Y%m%d_%H%M%S")
         output_directory = f"AutogluonModels/ag-{timestamp}{os.path.sep}"
-        os.makedirs(output_directory)
+        for i in range(1, 1000):
+            try:
+                os.makedirs(output_directory, exist_ok=False)
+                break
+            except FileExistsError as e:
+                output_directory = f"AutogluonModels/ag-{timestamp}-{i:03d}{os.path.sep}"
+        else:
+            raise RuntimeError("more than 1000 jobs launched in the same second")
         logger.log(25, f"No output_directory specified. Models will be saved in: {output_directory}")
     output_directory = os.path.expanduser(output_directory)  # replace ~ with absolute path if it exists
     if output_directory[-1] != os.path.sep:
@@ -178,7 +186,6 @@ def normalize_pred_probas(y_predprob, problem_type, eps=1e-7):
             return normalize_multi_probas(y_predprob, eps)
     else:
         raise ValueError(f"Invalid problem_type")
-    return y_predprob
 
 
 def normalize_binary_probas(y_predprob, eps):
@@ -205,3 +212,122 @@ def normalize_multi_probas(y_predprob, eps):
     return y_predprob
 
 
+def infer_problem_type(y: Series):
+    """ Identifies which type of prediction problem we are interested in (if user has not specified).
+        Ie. binary classification, multi-class classification, or regression.
+    """
+    if len(y) == 0:
+        raise ValueError("provided labels cannot have length = 0")
+    y = y.dropna()  # Remove missing values from y (there should not be any though as they were removed in Learner.general_data_processing())
+    num_rows = len(y)
+
+    unique_values = y.unique()
+    unique_count = len(unique_values)
+    if unique_count > 10:
+        logger.log(20, f'Here are the first 10 unique label values in your data:  {list(unique_values[:10])}')
+    else:
+        logger.log(20, f'Here are the {unique_count} unique label values in your data:  {list(unique_values)}')
+
+    MULTICLASS_LIMIT = 1000  # if numeric and class count would be above this amount, assume it is regression
+    if num_rows > 1000:
+        REGRESS_THRESHOLD = 0.05  # if the unique-ratio is less than this, we assume multiclass classification, even when labels are integers
+    else:
+        REGRESS_THRESHOLD = 0.1
+
+    if unique_count == 2:
+        problem_type = BINARY
+        reason = "only two unique label-values observed"
+    elif y.dtype.name in ['object', 'category']:
+        problem_type = MULTICLASS
+        reason = f"dtype of label-column == {y.dtype.name}"
+    elif np.issubdtype(y.dtype, np.floating):
+        unique_ratio = unique_count / float(num_rows)
+        if (unique_ratio <= REGRESS_THRESHOLD) and (unique_count <= MULTICLASS_LIMIT):
+            try:
+                can_convert_to_int = np.array_equal(y, y.astype(int))
+                if can_convert_to_int:
+                    problem_type = MULTICLASS
+                    reason = "dtype of label-column == float, but few unique label-values observed and label-values can be converted to int"
+                else:
+                    problem_type = REGRESSION
+                    reason = "dtype of label-column == float and label-values can't be converted to int"
+            except:
+                problem_type = REGRESSION
+                reason = "dtype of label-column == float and label-values can't be converted to int"
+        else:
+            problem_type = REGRESSION
+            reason = "dtype of label-column == float and many unique label-values observed"
+    elif np.issubdtype(y.dtype, np.integer):
+        unique_ratio = unique_count / float(num_rows)
+        if (unique_ratio <= REGRESS_THRESHOLD) and (unique_count <= MULTICLASS_LIMIT):
+            problem_type = MULTICLASS  # TODO: Check if integers are from 0 to n-1 for n unique values, if they have a wide spread, it could still be regression
+            reason = "dtype of label-column == int, but few unique label-values observed"
+        else:
+            problem_type = REGRESSION
+            reason = "dtype of label-column == int and many unique label-values observed"
+    else:
+        raise NotImplementedError(f'label dtype {y.dtype} not supported!')
+    logger.log(25, f"AutoGluon infers your prediction problem is: {problem_type}  (because {reason}).")
+    logger.log(25, f"If this is wrong, please specify `problem_type` argument in fit() instead "
+                   f"(You may specify problem_type as one of: {[BINARY, MULTICLASS, REGRESSION]})\n")
+    return problem_type
+
+
+def infer_eval_metric(problem_type: str) -> Scorer:
+    """Infers appropriate default eval metric based on problem_type. Useful when no eval_metric was provided."""
+    if problem_type == BINARY:
+        return accuracy
+    elif problem_type == MULTICLASS:
+        return accuracy
+    else:
+        return root_mean_squared_error
+
+
+def default_holdout_frac(num_train_rows, hyperparameter_tune=False):
+    """ Returns default holdout_frac used in fit().
+        Between row count 5,000 and 25,000 keep 0.1 holdout_frac, as we want to grow validation set to a stable 2500 examples.
+    """
+    if num_train_rows < 5000:
+        holdout_frac = max(0.1, min(0.2, 500.0 / num_train_rows))
+    else:
+        holdout_frac = max(0.01, min(0.1, 2500.0 / num_train_rows))
+
+    if hyperparameter_tune:
+        holdout_frac = min(0.2, holdout_frac * 2)  # We want to allocate more validation data for HPO to avoid overfitting
+
+    return holdout_frac
+
+
+def augment_rare_classes(X, label, threshold):
+    """ Use this method when using certain eval_metrics like log_loss, for which no classes may be filtered out.
+        This method will augment dataset with additional examples of rare classes.
+    """
+    class_counts = X[label].value_counts()
+    class_counts_invalid = class_counts[class_counts < threshold]
+    if len(class_counts_invalid) == 0:
+        logger.debug("augment_rare_classes did not need to duplicate any data from rare classes")
+        return X
+
+    aug_df = None
+    for clss, n_clss in class_counts_invalid.iteritems():
+        n_toadd = threshold - n_clss
+        clss_df = X.loc[X[label] == clss]
+        if aug_df is None:
+            aug_df = clss_df[:0].copy()
+        duplicate_times = int(np.floor(n_toadd / n_clss))
+        remainder = n_toadd % n_clss
+        new_df = clss_df.copy()
+        new_df = new_df[:remainder]
+        while duplicate_times > 0:
+            logger.debug(f"Duplicating data from rare class: {clss}")
+            duplicate_times -= 1
+            new_df = new_df.append(clss_df.copy())
+        aug_df = aug_df.append(new_df.copy())
+
+    X = X.append(aug_df)
+    class_counts = X[label].value_counts()
+    class_counts_invalid = class_counts[class_counts < threshold]
+    if len(class_counts_invalid) > 0:
+        raise RuntimeError("augment_rare_classes failed to produce enough data from rare classes")
+    logger.log(15, "Replicated some data from rare classes in training set because eval_metric requires all classes")
+    return X

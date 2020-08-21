@@ -15,12 +15,12 @@ class WeightedEnsembleModel(StackerEnsembleModel):
         model_0 = base_model_types_dict[base_model_names[0]].load(path=base_model_paths_dict[base_model_names[0]], verbose=False)
         super().__init__(model_base=model_0, base_model_names=base_model_names, base_model_paths_dict=base_model_paths_dict, base_model_types_dict=base_model_types_dict, use_orig_features=False, **kwargs)
         child_hyperparameters = kwargs.get('_tmp_greedy_hyperparameters', None)  # TODO: Rework to avoid this hack
-        self.model_base = GreedyWeightedEnsembleModel(path='', name='greedy_ensemble', num_classes=self.num_classes, base_model_names=self.stack_column_prefix_lst, problem_type=self.problem_type, objective_func=self.objective_func, stopping_metric=self.stopping_metric, hyperparameters=child_hyperparameters)
+        self.model_base = GreedyWeightedEnsembleModel(path='', name='greedy_ensemble', num_classes=self.num_classes, base_model_names=self.stack_column_prefix_lst, problem_type=self.problem_type, eval_metric=self.eval_metric, stopping_metric=self.stopping_metric, hyperparameters=child_hyperparameters)
         self._child_type = type(self.model_base)
         self.low_memory = False
 
-    def fit(self, X, y, k_fold=5, k_fold_start=0, k_fold_end=None, n_repeats=1, n_repeat_start=0, compute_base_preds=True, time_limit=None, **kwargs):
-        super().fit(X, y, k_fold=k_fold, k_fold_start=k_fold_start, k_fold_end=k_fold_end, n_repeats=n_repeats, n_repeat_start=n_repeat_start, compute_base_preds=compute_base_preds, time_limit=time_limit, **kwargs)
+    def _fit(self, X, y, k_fold=5, k_fold_start=0, k_fold_end=None, n_repeats=1, n_repeat_start=0, compute_base_preds=True, time_limit=None, **kwargs):
+        super()._fit(X, y, k_fold=k_fold, k_fold_start=k_fold_start, k_fold_end=k_fold_end, n_repeats=n_repeats, n_repeat_start=n_repeat_start, compute_base_preds=compute_base_preds, time_limit=time_limit, **kwargs)
         stack_columns = []
         for model in self.models:
             model = self.load_child(model, verbose=False)
@@ -43,7 +43,7 @@ class WeightedEnsembleModel(StackerEnsembleModel):
             weights_dict[key] = weights_dict[key] / num_models
         return weights_dict
 
-    def compute_feature_importance(self, X, y, features_to_use=None, preprocess=True, is_oof=True, **kwargs):
+    def compute_feature_importance(self, X, y, features_to_use=None, preprocess=True, is_oof=True, **kwargs) -> pd.Series:
         logger.warning('Warning: non-raw feature importance calculation is not valid for weighted ensemble since it does not have features, returning ensemble weights instead...')
         if is_oof:
             feature_importance = pd.Series(self._get_model_weights()).sort_values(ascending=False)

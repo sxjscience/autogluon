@@ -1,15 +1,15 @@
-""" Runs autogluon.tabular on multiple benchmark datasets. 
+""" Runs autogluon.tabular on multiple benchmark datasets.
     Run this benchmark with fast_benchmark=False to assess whether major chances make autogluon better or worse overall.
     Lower performance-values = better, normalized to [0,1] for each dataset to enable cross-dataset comparisons.
     Classification performance = error-rate, Regression performance = 1 - R^2
-    
+
     # TODO: assess that Autogluon correctly inferred the type of each feature (continuous vs categorical vs text)
-    
+
     # TODO: may want to take allowed run-time of AutoGluon into account? Eg. can produce performance vs training time curves for each dataset.
-    
+
     # TODO: We'd like to add extra benchmark datasets with the following properties:
     - parquet file format
-    - poker hand data: https://archive.ics.uci.edu/ml/datasets/Poker+Hand 
+    - poker hand data: https://archive.ics.uci.edu/ml/datasets/Poker+Hand
     - test dataset with just one data point
     - test dataset where order of columns different than in training data (same column names)
     - extreme-multiclass classification (500+ classes)
@@ -83,8 +83,12 @@ def test_advanced_functionality():
     shutil.rmtree(savedir, ignore_errors=True)  # Delete AutoGluon output directory to ensure previous runs' information has been removed.
     predictor = task.fit(train_data=train_data, label=label, output_directory=savedir)
     leaderboard = predictor.leaderboard(dataset=test_data)
-    assert(set(predictor.model_names) == set(leaderboard['model']))
-    num_models = len(predictor.model_names)
+    leaderboard_extra = predictor.leaderboard(dataset=test_data, extra_info=True)
+    assert set(predictor.get_model_names()) == set(leaderboard['model'])
+    assert set(predictor.get_model_names()) == set(leaderboard_extra['model'])
+    assert set(leaderboard_extra.columns).issuperset(set(leaderboard.columns))
+    assert len(leaderboard) == len(leaderboard_extra)
+    num_models = len(predictor.get_model_names())
     feature_importances = predictor.feature_importance(dataset=test_data)
     original_features = set(train_data.columns)
     original_features.remove(label)
@@ -95,18 +99,19 @@ def test_advanced_functionality():
     assert(predictor.get_model_full_dict() == dict())
     predictor.refit_full()
     assert(len(predictor.get_model_full_dict()) == num_models)
-    assert(len(predictor.model_names) == num_models * 2)
-    for model in predictor.model_names:
+    assert(len(predictor.get_model_names()) == num_models * 2)
+    for model in predictor.get_model_names():
         predictor.predict(dataset=test_data, model=model)
     predictor.refit_full()  # Confirm that refit_models aren't further refit.
     assert(len(predictor.get_model_full_dict()) == num_models)
-    assert(len(predictor.model_names) == num_models * 2)
+    assert(len(predictor.get_model_names()) == num_models * 2)
     predictor.delete_models(models_to_keep=[])  # Test that dry-run doesn't delete models
-    assert(len(predictor.model_names) == num_models * 2)
+    assert(len(predictor.get_model_names()) == num_models * 2)
     predictor.predict(dataset=test_data)
     predictor.delete_models(models_to_keep=[], dry_run=False)  # Test that dry-run deletes models
-    assert(len(predictor.model_names) == 0)
-    assert(len(predictor.leaderboard()) == 0)
+    assert len(predictor.get_model_names()) == 0
+    assert len(predictor.leaderboard()) == 0
+    assert len(predictor.leaderboard(extra_info=True)) == 0
     try:
         predictor.predict(dataset=test_data)
     except:
@@ -165,7 +170,7 @@ def run_tabular_benchmark_toy(fit_args):
         raise AssertionError(f'{dataset["name"]} should raise an exception.')
 
 
-def run_tabular_benchmarks(fast_benchmark, subsample_size, perf_threshold, seed_val, fit_args, dataset_indices=None):
+def run_tabular_benchmarks(fast_benchmark, subsample_size, perf_threshold, seed_val, fit_args, dataset_indices=None, run_distill=False):
     print("Running fit with args:")
     print(fit_args)
     # Each train/test dataset must be located in single directory with the given names.
@@ -195,8 +200,8 @@ def run_tabular_benchmarks(fast_benchmark, subsample_size, perf_threshold, seed_
 
     toyregres_dataset = {'url': 'https://autogluon.s3.amazonaws.com/datasets/toyRegression.zip',
                          'name': 'toyRegression',
-                         'problem_type': REGRESSION, 
-                        'label_column': 'y', 
+                         'problem_type': REGRESSION,
+                        'label_column': 'y',
                         'performance_val': 0.183}
     # 1-D toy deterministic regression task with: heavy label+feature missingness, extra distraction column in test data
 
@@ -234,7 +239,7 @@ def run_tabular_benchmarks(fast_benchmark, subsample_size, perf_threshold, seed_
                     raise ValueError("fast_benchmark specified without subsample_size")
                 train_data = train_data.head(subsample_size) # subsample for fast_benchmark
             predictor = task.fit(train_data=train_data, label=label_column, output_directory=savedir, **fit_args)
-            results = predictor.fit_summary(verbosity=0)
+            results = predictor.fit_summary(verbosity=4)
             if predictor.problem_type != dataset['problem_type']:
                 warnings.warn("For dataset %s: Autogluon inferred problem_type = %s, but should = %s" % (dataset['name'], predictor.problem_type, dataset['problem_type']))
             predictor = task.load(savedir)  # Test loading previously-trained predictor from file
@@ -247,9 +252,10 @@ def run_tabular_benchmarks(fast_benchmark, subsample_size, perf_threshold, seed_
             performance_vals[idx] = perf
             print("Performance on dataset %s: %s   (previous perf=%s)" % (dataset['name'], performance_vals[idx], dataset['performance_val']))
             if (not fast_benchmark) and (performance_vals[idx] > dataset['performance_val'] * perf_threshold):
-                warnings.warn("Performance on dataset %s is %s times worse than previous performance." % 
+                warnings.warn("Performance on dataset %s is %s times worse than previous performance." %
                               (dataset['name'], performance_vals[idx]/(EPS+dataset['performance_val'])))
-
+            if run_distill:
+                predictor.distill(time_limits=60, augment_args={'size_factor':0.5})
     # Summarize:
     avg_perf = np.mean(performance_vals)
     median_perf = np.median(performance_vals)
@@ -519,5 +525,5 @@ def test_tabular_bagstack():
         fit_args['num_bagging_sets'] = 2
     ###################################################################
     run_tabular_benchmarks(fast_benchmark=fast_benchmark, subsample_size=subsample_size, perf_threshold=perf_threshold,
-                           seed_val=seed_val, fit_args=fit_args)
+                           seed_val=seed_val, fit_args=fit_args, run_distill=True)
 

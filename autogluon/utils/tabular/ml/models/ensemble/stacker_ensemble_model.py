@@ -9,6 +9,7 @@ from ...utils import generate_kfold
 from ..abstract.abstract_model import AbstractModel
 from .bagged_ensemble_model import BaggedEnsembleModel
 from ...constants import MULTICLASS
+from ....features.feature_types_metadata import FeatureTypesMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -112,21 +113,23 @@ class StackerEnsembleModel(BaggedEnsembleModel):
             pred_proba.set_index(index, inplace=True)
         return pred_proba
 
-    def fit(self, X, y, k_fold=5, k_fold_start=0, k_fold_end=None, n_repeats=1, n_repeat_start=0, compute_base_preds=True, time_limit=None, **kwargs):
+    def _fit(self, X, y, k_fold=5, k_fold_start=0, k_fold_end=None, n_repeats=1, n_repeat_start=0, compute_base_preds=True, time_limit=None, **kwargs):
         start_time = time.time()
         X = self.preprocess(X=X, preprocess=False, fit=True, compute_base_preds=compute_base_preds)
         if time_limit is not None:
             time_limit = time_limit - (time.time() - start_time)
         if len(self.models) == 0:
             if self.feature_types_metadata is None:  # TODO: This is probably not the best way to do this
-                self.feature_types_metadata = {'float': self.stack_columns}
+                feature_types_raw = defaultdict(list)
+                feature_types_raw['float'] = self.stack_columns
+                feature_types_special = defaultdict(list)
+                feature_types_special['stack'] = self.stack_columns
+                self.feature_types_metadata = FeatureTypesMetadata(feature_types_raw=feature_types_raw, feature_types_special=feature_types_special)
             else:
                 self.feature_types_metadata = copy.deepcopy(self.feature_types_metadata)
-                if 'float' in self.feature_types_metadata.keys():
-                    self.feature_types_metadata['float'] += self.stack_columns
-                else:
-                    self.feature_types_metadata['float'] = self.stack_columns
-        super().fit(X=X, y=y, k_fold=k_fold, k_fold_start=k_fold_start, k_fold_end=k_fold_end, n_repeats=n_repeats, n_repeat_start=n_repeat_start, time_limit=time_limit, **kwargs)
+                self.feature_types_metadata.feature_types_raw['float'] += self.stack_columns
+                self.feature_types_metadata.feature_types_special['stack'] += self.stack_columns
+        super()._fit(X=X, y=y, k_fold=k_fold, k_fold_start=k_fold_start, k_fold_end=k_fold_end, n_repeats=n_repeats, n_repeat_start=n_repeat_start, time_limit=time_limit, **kwargs)
 
     def set_contexts(self, path_context):
         path_root_orig = self.path_root
@@ -151,13 +154,15 @@ class StackerEnsembleModel(BaggedEnsembleModel):
 
         if len(self.models) == 0:
             if self.feature_types_metadata is None:  # TODO: This is probably not the best way to do this
-                self.feature_types_metadata = {'float': self.stack_columns}
+                feature_types_raw = defaultdict(list)
+                feature_types_raw['float'] = self.stack_columns
+                feature_types_special = defaultdict(list)
+                feature_types_special['stack'] = self.stack_columns
+                self.feature_types_metadata = FeatureTypesMetadata(feature_types_raw=feature_types_raw, feature_types_special=feature_types_special)
             else:
                 self.feature_types_metadata = copy.deepcopy(self.feature_types_metadata)
-                if 'float' in self.feature_types_metadata.keys():
-                    self.feature_types_metadata['float'] += self.stack_columns
-                else:
-                    self.feature_types_metadata['float'] = self.stack_columns
+                self.feature_types_metadata.feature_types_raw['float'] += self.stack_columns
+                self.feature_types_metadata.feature_types_special['stack'] += self.stack_columns
         self.model_base.feature_types_metadata = self.feature_types_metadata  # TODO: Move this
 
         # TODO: Preprocess data here instead of repeatedly
@@ -165,18 +170,18 @@ class StackerEnsembleModel(BaggedEnsembleModel):
         kfolds = generate_kfold(X=X, y=y, n_splits=k_fold, stratified=self.is_stratified(), random_state=self._random_state, n_repeats=1)
 
         train_index, test_index = kfolds[0]
-        X_train, X_test = X.iloc[train_index, :], X.iloc[test_index, :]
-        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+        X_train, X_val = X.iloc[train_index, :], X.iloc[test_index, :]
+        y_train, y_val = y.iloc[train_index], y.iloc[test_index]
         orig_time = scheduler_options[1]['time_out']
         scheduler_options[1]['time_out'] = orig_time * 0.8  # TODO: Scheduler doesn't early stop on final model, this is a safety net. Scheduler should be updated to early stop
-        hpo_models, hpo_model_performances, hpo_results = self.model_base.hyperparameter_tune(X_train=X_train, X_test=X_test, Y_train=y_train, Y_test=y_test, scheduler_options=scheduler_options, **kwargs)
+        hpo_models, hpo_model_performances, hpo_results = self.model_base.hyperparameter_tune(X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val, scheduler_options=scheduler_options, **kwargs)
         scheduler_options[1]['time_out'] = orig_time
 
         stackers = {}
         stackers_performance = {}
         for i, (model_name, model_path) in enumerate(hpo_models.items()):
             child: AbstractModel = self._child_type.load(path=model_path)
-            y_pred_proba = child.predict_proba(X_test)
+            y_pred_proba = child.predict_proba(X_val)
 
             # TODO: Create new StackerEnsemble Here
             stacker = copy.deepcopy(self)
