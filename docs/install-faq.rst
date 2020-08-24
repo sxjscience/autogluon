@@ -1,7 +1,7 @@
 * I cannot install the package and it reports the error "XXX is not a supported wheel on this platform".
 
    One possibility is that you are using an older version of pip. Try to upgrade your pip to a version later than "19.0.0",
-e.g., use the following command:
+   e.g., use the following command:
 
    .. code-block::
 
