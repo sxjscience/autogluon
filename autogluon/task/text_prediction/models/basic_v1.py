@@ -367,11 +367,6 @@ def train_function(args, reporter, train_data, tuning_data,
                                                 merge_text=cfg.model.preprocess.merge_text)
     logger.info('Process training set...')
     processed_train = preprocessor.process_train(train_data.table)
-    for feature, label in processed_train:
-        print(str(feature[0]))
-        print(str(feature[1]))
-        print(str(label))
-        ch = input()
     logger.info('Done!')
     logger.info('Process dev set...')
     processed_dev = preprocessor.process_test(tuning_data.table)
@@ -383,6 +378,9 @@ def train_function(args, reporter, train_data, tuning_data,
     base_batch_size = cfg.optimization.per_device_batch_size
     num_accumulated = int(np.ceil(cfg.optimization.batch_size / base_batch_size))
     inference_base_batch_size = base_batch_size * cfg.optimization.val_batch_size_mult
+    train_batchify_fn = preprocessor.batchify(is_test=False)
+    print(train_batchify_fn([processed_train[0], processed_train[1]]))
+    ch = input()
     train_dataloader = DataLoader(processed_train,
                                   batch_size=base_batch_size,
                                   shuffle=True,
