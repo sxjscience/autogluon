@@ -341,7 +341,8 @@ class TextPrediction(BaseTask):
         train_data = TabularDataset(train_data,
                                     columns=all_columns,
                                     label_columns=label_columns)
-        print(train_data.column_properties)
+        for key in train_data.column_properties:
+            print(key, train_data.column_properties[key])
         ch = input()
         tuning_data = TabularDataset(tuning_data, column_properties=train_data.column_properties)
 
