@@ -367,8 +367,9 @@ def train_function(args, reporter, train_data, tuning_data,
                                                 merge_text=cfg.model.preprocess.merge_text)
     logger.info('Process training set...')
     processed_train = preprocessor.process_train(train_data.table)
-    for ele in processed_train:
-        print(ele)
+    for feature, label in processed_train:
+        print(feature)
+        print(label)
         ch = input()
     logger.info('Done!')
     logger.info('Process dev set...')
