@@ -368,7 +368,8 @@ def train_function(args, reporter, train_data, tuning_data,
     logger.info('Process training set...')
     processed_train = preprocessor.process_train(train_data.table)
     for feature, label in processed_train:
-        print(str(feature))
+        print(str(feature[0]))
+        print(str(feature[1]))
         print(str(label))
         ch = input()
     logger.info('Done!')
