@@ -4,28 +4,33 @@
   <img src="https://user-images.githubusercontent.com/16392542/77208906-224aa500-6aba-11ea-96bd-e81806074030.png" width="350">
 </div>
 
-## AutoML Toolkit for Deep Learning
+## AutoML Toolkit for Text, Image, and Tabular Data
 
 [![Build Status](http://ci.mxnet.io/view/all/job/autogluon/job/master/badge/icon)](http://ci.mxnet.io/view/all/job/autogluon/job/master/)
 [![Pypi Version](https://img.shields.io/pypi/v/autogluon.svg)](https://pypi.org/project/autogluon/#history)
 ![Upload Python Package](https://github.com/awslabs/autogluon/workflows/Upload%20Python%20Package/badge.svg)
 
-AutoGluon automates machine learning tasks enabling you to easily achieve strong predictive performance in your applications.  With just a few lines of code, you can train and deploy high-accuracy deep learning models on tabular, image, and text data.
+AutoGluon automates machine learning tasks enabling you to easily achieve strong predictive performance in your applications.  With just a few lines of code, you can train and deploy high-accuracy machine learning and deep learning models on tabular, text, and image data.
 
 ## Example
 
 ```python
 # First install package from terminal:
 # python3 -m pip install --upgrade pip
+# python3 -m pip install --upgrade setuptools
 # python3 -m pip install --upgrade "mxnet<2.0.0"
-# python3 -m pip install autogluon
+# python3 -m pip install --pre autogluon
 
-from autogluon import TabularPrediction as task
+from autogluon.tabular import TabularPrediction as task
 train_data = task.Dataset(file_path='https://autogluon.s3.amazonaws.com/datasets/Inc/train.csv')
 test_data = task.Dataset(file_path='https://autogluon.s3.amazonaws.com/datasets/Inc/test.csv')
 predictor = task.fit(train_data=train_data, label='class')
 performance = predictor.evaluate(test_data)
 ```
+## News
+
+**Announcement for previous users:** The AutoGluon codebase has been modularized into [namespace packages](https://packaging.python.org/guides/packaging-namespace-packages/), which means you now only need those dependencies relevant to your prediction task of interest! For example, you can now work with tabular data without having to [install](https://autogluon.mxnet.io/install.html) dependencies required for AutoGluon's computer vision tasks (and vice versa). Unfortunately this improvement required a minor API change (eg. instead of `from autogluon import TabularPrediction`, you should now do: `from autogluon.tabular import TabularPrediction`), for all versions newer than v0.0.14. Documentation/tutorials under the old API may still be viewed [for version 0.0.14](https://autogluon.mxnet.io/v0.0.14/index.html) which is the last released version under the old API.
+
 
 ## Resources
 
@@ -84,7 +89,7 @@ Also have a look at our paper ["Model-based Asynchronous Hyperparameter and Neur
 ```bibtex
 @article{abohb,
   title={Model-based Asynchronous Hyperparameter and Neural Architecture Search},
-  author={Klein, Aaron and Tiao, Louis and Lienart, Thibaut and Archambeau, Cedric and Seeger, Matthias}
+  author={Klein, Aaron and Tiao, Louis and Lienart, Thibaut and Archambeau, Cedric and Seeger, Matthias},
   journal={arXiv preprint arXiv:2003.10865},
   year={2020}
 }
