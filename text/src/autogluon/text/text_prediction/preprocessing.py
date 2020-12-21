@@ -164,8 +164,10 @@ def process_text_entity_features(
         encoded_token_ids = np.concatenate(encoded_token_ids).astype(np.int32)
         segment_ids = np.concatenate(segment_ids).astype(np.int32)
         if store_token_offsets:
-            assert False, f'Encoded token offsets={encoded_token_offsets}'
-            encoded_token_offsets = np.concatenate(encoded_token_offsets).astype(np.int32)
+            try:
+                encoded_token_offsets = np.concatenate(encoded_token_offsets).astype(np.int32)
+            except Exception:
+                raise Exception(f'Encoded token offsets={encoded_token_offsets}')
             text_features.append(TextTokenIdsField(encoded_token_ids, segment_ids,
                                                    encoded_token_offsets))
         else:
