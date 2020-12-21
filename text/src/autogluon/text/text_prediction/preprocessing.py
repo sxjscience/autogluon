@@ -4,6 +4,7 @@ import os
 from collections import OrderedDict
 from typing import Dict, Optional, List, Tuple, Union
 import numpy as np
+import logging
 from autogluon_contrib_nlp.data import batchify as bf
 from autogluon_contrib_nlp.utils.preprocessing import get_trimmed_lengths, match_tokens_with_char_spans
 from autogluon_contrib_nlp.utils.misc import num_mp_workers
@@ -163,7 +164,7 @@ def process_text_entity_features(
         encoded_token_ids = np.concatenate(encoded_token_ids).astype(np.int32)
         segment_ids = np.concatenate(segment_ids).astype(np.int32)
         if store_token_offsets:
-            print('Encoded token offsets=', encoded_token_offsets)
+            logging.info('Encoded token offsets=', encoded_token_offsets)
             encoded_token_offsets = np.concatenate(encoded_token_offsets).astype(np.int32)
             text_features.append(TextTokenIdsField(encoded_token_ids, segment_ids,
                                                    encoded_token_offsets))
