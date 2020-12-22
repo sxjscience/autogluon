@@ -5,7 +5,7 @@ import pandas as pd
 import json
 from autogluon.core.utils.loaders import load_pd
 from . import constants as _C
-from .column_property import CategoricalColumnProperty, TextColumnProperty, NumericalColumnProperty,\
+from .column_normalizers import ColumnProcessor, CategoricalColumnProperty, TextColumnProperty, NumericalColumnProperty,\
     get_column_properties_from_metadata
 from autogluon_contrib_nlp.base import INT_TYPES, FLOAT_TYPES, BOOL_TYPES
 from typing import List, Optional, Union, Dict, Tuple
@@ -270,15 +270,17 @@ def infer_problem_type(column_properties, label_col_name):
         raise NotImplementedError('Cannot infer the problem type')
 
 
-class TabularDataset:
+class TabularWithTextDataset:
     def __init__(self, path_or_df: Union[str, pd.DataFrame],
                  *,
                  columns=None,
                  label_columns=None,
                  column_metadata: Optional[Union[str, Dict]] = None,
-                 column_properties: Optional[collections.OrderedDict] = None,
+                 column_processors: Optional[Dict[str, ColumnProcessor]] = None,
                  categorical_default_handle_missing_value=True):
-        """
+        """The Tabular dataset with Text column inside.
+
+        This is used in AutoGluon Text.
 
         Parameters
         ----------
@@ -289,9 +291,29 @@ class TabularDataset:
         label_columns
             The name of the label columns. This helps to infer the column properties.
         column_metadata
-            The metadata object that describes the property of the columns in the dataset
-        column_properties
-            The given column properties
+            The metadata object that describes the type of the columns in the dataset.
+            It provide users with a way to specify the types of the columns in the
+
+            We support the following types:
+            - Text
+                 Can either be raw text data, or file paths that contain the raw text.
+            - Numerical
+                Numerical data. It means that the column contains floating numbers or
+                feature vectors
+            - Categorical
+                Categorical data. It means the column should be treated as a
+                categorical column.
+            - Entity
+                It means the column contains character-level-annotated entities.
+                It can be
+                   - (start, end)
+                   - (start, end, label)
+                   - List of (start, end)
+                   - List of (start, end, label)
+            For example, the user can specify:
+                'feature':
+        column_processors
+            The given column processors. If not given, we will infer these column processors.
         categorical_default_handle_missing_value
             Whether to handle missing value in categorical columns by default
         """
@@ -326,6 +348,7 @@ class TabularDataset:
 
     @property
     def table(self):
+        """Get the intrinsic data table"""
         return self._table
 
     @property

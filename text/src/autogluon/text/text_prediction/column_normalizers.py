@@ -7,23 +7,27 @@ from typing import List, Optional, Union, Tuple, Hashable
 from . import constants as _C
 from autogluon_contrib_nlp.data.vocab import Vocab
 
-__all__ = ['CategoricalColumnProperty',
-           'TextColumnProperty',
-           'NumericalColumnProperty',
-           'EntityColumnProperty']
+__all__ = ['ColumnNormalizer',
+           'CategoricalColumnNormalizer',
+           'TextColumnNormalizer',
+           'NumericalColumnProcessor',
+           'EntityColumnProcessor']
 
 
-class ColumnProperty(abc.ABC):
-    """Column property means the general property of the columns.
+class ColumnNormalizer(abc.ABC):
+    """Column processor.
 
-    It performs basic featurization
+    This normalizes the columns in AutoGluon Text.
+
+    The typical workflow is:
+
+    raw dataframe --> Normalizer --> normalized dataframe
 
     """
     type = _C.NULL
 
     def __init__(self, **kwargs):
-        self._parsed = False
-        self._freeze = False
+        self._fit_called = False
         self._num_sample = None
         self._num_missing_samples = None
         self._name = None
@@ -47,8 +51,15 @@ class ColumnProperty(abc.ABC):
     def transform(self, ele):
         return ele
 
+    def inverse_transform(self, ele):
+        raise NotImplementedError
+
+    def fit_transform(self, ele):
+        self.fit(ele)
+        return self.transform(ele)
+
     @abc.abstractmethod
-    def parse(self, column_data: pd.Series):
+    def fit(self, column_data: pd.Series):
         """Parse the column data and fill in the necessary properties"""
         assert not self._parsed, 'Cannot call parse twice. ' \
                                  'Use "col_prop.clone()" and parse again.'
@@ -65,8 +76,8 @@ class ColumnProperty(abc.ABC):
 
     def info(self, additional_attributes=None):
         basename = self.__class__.__name__
-        if basename.endswith('ColumnProperty'):
-            basename = basename[:(-len('ColumnProperty'))]
+        if basename.endswith('ColumnNormalizer'):
+            basename = basename[:(-len('ColumnNormalizer'))]
         padding = 3
         ret = '{}(\n'.format(basename)
         ret += ' ' * padding + 'name="{}"\n'.format(self.name)
@@ -84,6 +95,15 @@ class ColumnProperty(abc.ABC):
 
     def __str__(self):
         return self.info()
+
+    @abc.abstractmethod
+    def save(self):
+        pass
+
+    @classmethod
+    @abc.abstractmethod
+    def load(cls):
+        pass
 
 
 class CategoricalColumnProperty(ColumnProperty):

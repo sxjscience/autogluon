@@ -1,6 +1,6 @@
 from . import models
 from . import modules
-from . import column_property
+from . import column_normalizers
 from . import constants
 from . import dataset
 from . import fields
