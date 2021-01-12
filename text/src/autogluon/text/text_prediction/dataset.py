@@ -197,7 +197,7 @@ def get_column_properties(
     return column_properties
 
 
-def normalize_df(df, convert_text_to_numerical=True, remove_none=True):
+def normalize_df(df, convert_text_to_numerical=True, text_fill_nan=True):
     """Try to convert the text columns in the input data-frame to numerical columns
 
     Parameters
@@ -206,8 +206,8 @@ def normalize_df(df, convert_text_to_numerical=True, remove_none=True):
         The DataFrame
     convert_text_to_numerical
         Whether to convert text columns to numerical columns
-    remove_none
-        Whether to try to remove None values in the sample.
+    text_fill_nan
+        Whether to fill the nan values in the text column
 
     Returns
     -------
@@ -222,7 +222,7 @@ def normalize_df(df, convert_text_to_numerical=True, remove_none=True):
             val = col[idx]
             if isinstance(val, str):
                 num_missing = col.isnull().sum().sum().item()
-                if num_missing > 0 and remove_none:
+                if num_missing > 0 and text_fill_nan:
                     col = col.fillna('')
                     conversion_cols[col_name] = col
                 if convert_text_to_numerical:
@@ -270,7 +270,7 @@ def infer_problem_type(column_properties, label_col_name):
         raise NotImplementedError('Cannot infer the problem type')
 
 
-class TabularDataset:
+class MultimodalTextDataset:
     def __init__(self, path_or_df: Union[str, pd.DataFrame],
                  *,
                  columns=None,
@@ -278,7 +278,17 @@ class TabularDataset:
                  column_metadata: Optional[Union[str, Dict]] = None,
                  column_properties: Optional[collections.OrderedDict] = None,
                  categorical_default_handle_missing_value=True):
-        """
+        """Multimodal tabular dataset with text, numerical and categorical columns.
+
+        We will first analyze the dataset to detect the type of each column and perform
+        appropriate normalization.
+        In the procedure, we will try to perform the following
+
+        - convert text column to numerical column if possible
+        - convert columns to categorical column if it is
+        - detect entity columns
+
+        After that, we will build the on top of
 
         Parameters
         ----------
@@ -291,7 +301,7 @@ class TabularDataset:
         column_metadata
             The metadata object that describes the property of the columns in the dataset
         column_properties
-            The given column properties
+            The provided column properties
         categorical_default_handle_missing_value
             Whether to handle missing value in categorical columns by default
         """
@@ -310,7 +320,7 @@ class TabularDataset:
         elif isinstance(column_metadata, str):
             with open(column_metadata, 'r') as f:
                 column_metadata = json.load(f)
-        # Inference the column properties
+        # Infer the column properties
         column_properties = get_column_properties(
             df,
             metadata=column_metadata,
@@ -326,6 +336,7 @@ class TabularDataset:
 
     @property
     def table(self):
+        """Get the internal normalized table"""
         return self._table
 
     @property

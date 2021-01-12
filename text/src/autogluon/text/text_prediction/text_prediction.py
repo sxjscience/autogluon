@@ -251,18 +251,23 @@ class TextPrediction(BaseTask):
 
         Parameters
         ----------
-        train_data : :class:`autogluon.task.tabular_prediction.TabularDataset` or `pandas.DataFrame`
+        train_data : `pandas.DataFrame`
             Training dataset where rows = individual training examples, columns = features.
-        label : str
-            Name of the label column. It can be a stringBy default, we will search for a column named
-        tuning_data : :class:`autogluon.task.tabular_prediction.TabularDataset` or `pandas.DataFrame`, default = None
-            Another dataset containing validation data reserved for hyperparameter tuning (in same format as training data).
-            If `tuning_data = None`, `fit()` will automatically hold out random examples from `train_data` for validation.
+        label : str or list of str
+            Name of the label column(s). It can be a string or a list of string.
+            By default, we will search for a column named "label".
+        tuning_data : `pandas.DataFrame`, default = None
+            Another dataset containing validation data reserved for hyperparameter tuning and early stopping
+            (in same format as training data).
+            If `tuning_data = None`, `fit()` will automatically hold out random examples from
+            `train_data` for validation.
         time_limits : int or str, default = None
             Approximately how long `fit()` should run for (wallclock time in seconds if int).
-            String values may instead be used to specify time in different units such as: '1min' or '1hour'.
+            String values may instead be used to specify time in different units such as:
+            '1min' or '1hour'.
             Longer `time_limits` will usually improve predictive accuracy.
-            If not specified, `fit()` will run until all models to try by default have completed training.
+            If not specified, `fit()` will run until all models to try by default have
+            completed training.
         output_directory : str, default = './ag_text'
             Path to directory where models and intermediate outputs should be saved.
         feature_columns : List[str], default = None
@@ -273,21 +278,27 @@ class TextPrediction(BaseTask):
             If None, default value is selected based on the number of training examples.
         eval_metric : str, default = None
             The evaluation metric that will be used to evaluate the model's predictive performance.
-            If None, an appropriate default metric will be selected (accuracy for classification, mean-squared-error for regression).
+            If None, an appropriate default metric will be selected
+            (accuracy for classification, mean-squared-error for regression).
             Options for classification include: 'acc' (accuracy), 'nll' (negative log-likelihood).
-            Additional options for binary classification include: 'f1' (F1 score), 'mcc' (Matthews coefficient), 'auc' (area under ROC curve).
-            Options for regression include: 'mse' (mean squared error), 'rmse' (root mean squared error), 'mae' (mean absolute error).
-        stopping_metric, default = None
+            Additional options for binary classification include: 'f1' (F1 score),
+             'mcc' (Matthews coefficient), 'auc' (area under ROC curve).
+            Options for regression include: 'mse' (mean squared error),
+             'rmse' (root mean squared error), 'mae' (mean absolute error).
+        stopping_metric : str, default = None
             Metric which iteratively-trained models use to early stop to avoid overfitting.
             Defaults to `eval_metric` value (if None).
             Options are identical to options for `eval_metric`.
-        nthreads_per_trial, default = None
-            The number of threads per individual model training run. By default, all available CPUs are used.
-        ngpus_per_trial, default = None
-            The number of GPUs to use per individual model training run. If unspecified, a default value is chosen based on total number of GPUs available.
-        dist_ip_addrs, default = None
-            List of IP addresses corresponding to remote workers, in order to leverage distributed computation.
-        num_trials : , default = None
+        nthreads_per_trial : int, default = None
+            The number of threads per individual model training run.
+             By default, all available CPUs are used.
+        ngpus_per_trial : int, default = None
+            The number of GPUs to use per individual model training run.
+            If unspecified, a default value is chosen based on total number of GPUs available.
+        dist_ip_addrs : int, default = None
+            List of IP addresses corresponding to remote workers, in order to
+            leverage distributed computation.
+        num_trials : int, default = None
             The number of trials in the HPO search
         search_strategy : str, default = None
             Which hyperparameter search algorithm to use. Options include:
@@ -322,7 +333,8 @@ class TextPrediction(BaseTask):
         Returns
         -------
         model
-            A `BertForTextPredictionBasic` object that can be used for making predictions on new data.
+            A `BertForTextPredictionBasic` object that can be used for
+            making predictions on new data.
         """
         assert dist_ip_addrs is None, 'Training on remote machine is currently not supported.'
         # Version check of MXNet

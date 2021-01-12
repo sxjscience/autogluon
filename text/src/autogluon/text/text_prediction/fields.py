@@ -41,7 +41,8 @@ class _TextTokenIdsFieldBatchify:
 class TextTokenIdsField:
     type = _C.TEXT
 
-    def __init__(self, token_ids, segment_ids=None, token_offsets=None):
+    def __init__(self, token_ids, segment_ids=None, token_offsets=None,
+                 backend='mxnet'):
         """
 
         Parameters
