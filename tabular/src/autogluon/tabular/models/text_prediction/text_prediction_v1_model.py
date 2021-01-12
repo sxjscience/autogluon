@@ -232,6 +232,7 @@ class TextPredictionV1Model(AbstractModel):
             scheduler_options['max_t'] = scheduler_options.get(
                 'max_t', 50)
         if X_val is None:
+            # FIXME: v0.1 Update TextPrediction to use all training data in refit_full
             holdout_frac = default_holdout_frac(len(X_train), True)
             X_train, X_val = random_split_train_val(X_train, valid_ratio=holdout_frac)
         train_data = TabularDataset(X_train,
@@ -259,14 +260,14 @@ class TextPredictionV1Model(AbstractModel):
         if path is None:
             path = self.path
         text_nn_path = os.path.join(path, self.nn_model_name)
-        model_path = text_nn_path + os.sep + self.model_file_name
         logger.log(15, f'Save Model Text NN weights and model hyperparameters'
                        f' to {text_nn_path}. '
-                       f'The model hyper-parameters are saved as {model_path}')
+                       f'The model hyper-parameters are saved as'
+                       f' {os.path.join(path, self.model_file_name)}.')
         model = self.model
         self.model = None
         # save this AbstractModel object without NN weights
-        super().save(path=text_nn_path + os.sep, verbose=verbose)
+        super().save(path=path, verbose=verbose)
         model.save(text_nn_path)
         self.model = model
         return path
