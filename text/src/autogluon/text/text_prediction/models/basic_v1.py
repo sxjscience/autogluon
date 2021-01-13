@@ -145,6 +145,7 @@ def base_optimization_config():
 def base_model_config():
     cfg = CfgNode()
     cfg.preprocess = CfgNode()
+    # Whether to merge text column or not
     cfg.preprocess.merge_text = True
     cfg.preprocess.max_length = 128
     cfg.backbone = CfgNode()
@@ -597,6 +598,9 @@ class BertForTextPredictionBasic:
             reward_attr = '-{}'.format(stopping_metric_scorer.name)
         else:
             reward_attr = stopping_metric_scorer.name
+        print('time_out=', scheduler_options.get('time_out'))
+        print('time_limits=', time_limits)
+        ch = input()
         scheduler_options = compile_scheduler_options(
             scheduler_options=scheduler_options,
             search_strategy=search_strategy,

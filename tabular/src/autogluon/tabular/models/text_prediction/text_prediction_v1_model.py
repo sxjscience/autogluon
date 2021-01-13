@@ -200,7 +200,7 @@ class TextPredictionV1Model(AbstractModel):
             np.random.seed(seed)
             mx.random.seed(seed)
 
-        X_train = self.preprocess(X_train, fit=True)
+        X_train = self.preprocess(X_train)
         if X_val is not None:
             X_val = self.preprocess(X_val)
         column_properties = self._build_model(X_train=X_train,

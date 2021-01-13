@@ -296,6 +296,8 @@ class TextPrediction(BaseTask):
             The number of threads per individual model training run. By default, all available CPUs are used.
         ngpus_per_trial, default = None
             The number of GPUs to use per individual model training run. If unspecified, a default value is chosen based on total number of GPUs available.
+        ngpus_per_exp, default = None
+            The number of GPUs for each experiment.
         dist_ip_addrs, default = None
             List of IP addresses corresponding to remote workers, in order to leverage distributed computation.
         num_trials : , default = None
