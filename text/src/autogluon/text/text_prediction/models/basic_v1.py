@@ -125,7 +125,7 @@ def base_optimization_config():
                             ('correct_bias', False)]
     cfg.begin_lr = 0.0
     cfg.batch_size = 32
-    cfg.model_average = 5
+    cfg.model_average = 5  # We will average the top-K models on the validation set.
     cfg.per_device_batch_size = 16  # Per-device batch-size
     cfg.val_batch_size_mult = 4  # By default, we make the batch size for validation 4 times larger.
     cfg.lr = 1E-4
@@ -145,7 +145,15 @@ def base_optimization_config():
 def base_model_config():
     cfg = CfgNode()
     cfg.preprocess = CfgNode()
-    # Whether to merge text column or not
+    # Whether to merge multiple text columns
+    # - False: This means to treat each text column individually
+    #     We use separate streams to encode different networks:
+    #       [CLS] Text1 [SEP], [CLS] Text2 [SEP], [CLS] Text3 [SEP], ...
+    # - True: This means to merge the text columns via the same approach as in BERT
+    #     We use
+    #     [CLS] Text1 [SEP] Text2 [SEP] Text3 [SEP]
+    #     Also, to distinguish different text fields we set the segment ids as
+    #        0    0     0     1     1     0     0
     cfg.preprocess.merge_text = True
     cfg.preprocess.max_length = 128
     cfg.backbone = CfgNode()
