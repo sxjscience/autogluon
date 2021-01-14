@@ -593,6 +593,14 @@ class BertForTextPredictionBasic:
         # Scheduler and searcher for HPO
         if scheduler_options is None:
             scheduler_options = dict()
+        if search_strategy.endswith('hyperband'):
+            # Specific defaults for hyperband scheduling
+            scheduler_options['reduction_factor'] = scheduler_options.get(
+                'reduction_factor', 4)
+            scheduler_options['grace_period'] = scheduler_options.get(
+                'grace_period', 10)
+            scheduler_options['max_t'] = scheduler_options.get(
+                'max_t', 50)
         stopping_metric_scorer = get_metric(self._stopping_metric)
         if stopping_metric_scorer._sign < 0:
             reward_attr = '-{}'.format(stopping_metric_scorer.name)
@@ -658,8 +666,10 @@ class BertForTextPredictionBasic:
                              reward_attr=scheduler._reward_attr,
                              config=cfg)
         if plot_results:
-            plot_training_curves = os.path.join(self._output_directory, 'plot_training_curves.png')
-            scheduler.get_training_curves(filename=plot_training_curves, plot=plot_results,
+            plot_training_curves = os.path.join(self._output_directory,
+                                                'plot_training_curves.png')
+            scheduler.get_training_curves(filename=plot_training_curves,
+                                          plot=True,
                                           use_legend=True)
         # Consider to move this to a separate predictor
         self._config = cfg

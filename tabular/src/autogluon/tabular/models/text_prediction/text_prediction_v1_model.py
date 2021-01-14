@@ -214,16 +214,6 @@ class TextPredictionV1Model(AbstractModel):
             X_val.insert(len(X_val.columns), self._label_column_name, y_val)
         scheduler_options = self.params['hpo_params']['scheduler_options']
         search_strategy = self.params['hpo_params']['search_strategy']
-        if scheduler_options is None:
-            scheduler_options = dict()
-        if search_strategy.endswith('hyperband'):
-            # Specific defaults for hyperband scheduling
-            scheduler_options['reduction_factor'] = scheduler_options.get(
-                'reduction_factor', 4)
-            scheduler_options['grace_period'] = scheduler_options.get(
-                'grace_period', 10)
-            scheduler_options['max_t'] = scheduler_options.get(
-                'max_t', 50)
         if X_val is None:
             # FIXME: v0.1 Update TextPrediction to use all training data in refit_full
             holdout_frac = default_holdout_frac(len(X_train), True)

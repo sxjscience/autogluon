@@ -490,15 +490,6 @@ class TextPrediction(BaseTask):
             if scheduler_options is None:
                 scheduler_options = dict()
         scheduler_options['visualizer'] = visualizer
-        if search_strategy.endswith('hyperband'):
-            # Specific defaults for hyperband scheduling
-            scheduler_options['reduction_factor'] = scheduler_options.get(
-                'reduction_factor', 4)
-            scheduler_options['grace_period'] = scheduler_options.get(
-                'grace_period', 10)
-            scheduler_options['max_t'] = scheduler_options.get(
-                'max_t', 50)
-
         if recommended_resource['num_gpus'] == 0:
             if 'AUTOGLUON_TEXT_TRAIN_WITHOUT_GPU' in os.environ:
                 use_warning = int(os.environ['AUTOGLUON_TEXT_TRAIN_WITHOUT_GPU'])
