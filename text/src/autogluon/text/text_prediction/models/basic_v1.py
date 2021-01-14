@@ -156,7 +156,7 @@ def base_model_config():
 
 def base_learning_config():
     cfg = CfgNode()
-    cfg.early_stopping_patience = 10  # Stop if we cannot find a better checkpoint
+    cfg.early_stopping_patience = 5  # Stop if we cannot find a better checkpoint
     cfg.valid_ratio = 0.15      # The ratio of dataset to split for validation
     cfg.stop_metric = 'auto'    # Automatically define the stopping metric
     cfg.log_metrics = 'auto'    # Automatically determine the metrics used in logging
