@@ -136,7 +136,7 @@ def base_optimization_config():
     cfg.wd = 0.01  # Weight Decay
     cfg.max_grad_norm = 1.0  # Maximum Gradient Norm
     # The validation frequency = validation frequency * num_updates_in_an_epoch
-    cfg.valid_frequency = 0.1
+    cfg.valid_frequency = 0.5
     # Logging frequency = log frequency * num_updates_in_an_epoch
     cfg.log_frequency = 0.1
     return cfg
@@ -853,8 +853,6 @@ class BertForTextPredictionBasic:
         ----------
         dir_path
             Path to directory where this model was previously saved.
-        use_gpu
-            Whether try to use GPU if possible.
 
         Returns
         -------
