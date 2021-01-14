@@ -452,8 +452,6 @@ def train_function(args, reporter, train_data, tuning_data,
             else:
                 report_items.append((stopping_metric_scorer.name, dev_score))
             report_items.append(('exp_dir', exp_dir))
-            report_items.append(('Size of processed train data=', len(processed_train)))
-            report_items.append(('Size of processed dev data=', len(processed_dev)))
             if find_better:
                 best_report_items = report_items
             reporter(**dict(report_items))
