@@ -303,8 +303,8 @@ def train_function(args, reporter, train_data, tuning_data,
     base_batch_size = cfg.optimization.per_device_batch_size
     num_accumulated = int(np.ceil(cfg.optimization.batch_size / base_batch_size))
     inference_base_batch_size = base_batch_size * cfg.optimization.val_batch_size_mult
-    logger.info('Size of processed train data=', len(processed_train))
-    logger.info('Size of processed dev data=', len(processed_dev))
+    print('Size of processed train data=', len(processed_train))
+    print('Size of processed dev data=', len(processed_dev))
     train_dataloader = DataLoader(processed_train,
                                   batch_size=base_batch_size,
                                   shuffle=True,
