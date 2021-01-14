@@ -228,9 +228,6 @@ class TextPredictionV1Model(AbstractModel):
                                      label_columns=self._label_column_name)
         logger.info('Tuning Dataset:')
         logger.info(tuning_data)
-        os.makedirs(self.path, exist_ok=True)
-        X_train.to_parquet(os.path.join(self.path, 'text_prediction_train_data.pq'))
-        X_val.to_parquet(os.path.join(self.path, 'text_prediction_val_data.pq'))
         self.model.train(train_data=train_data,
                          tuning_data=tuning_data,
                          resource=resource,
