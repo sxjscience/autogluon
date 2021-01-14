@@ -598,9 +598,7 @@ class BertForTextPredictionBasic:
             reward_attr = '-{}'.format(stopping_metric_scorer.name)
         else:
             reward_attr = stopping_metric_scorer.name
-        print('time_out=', scheduler_options.get('time_out'))
-        print('time_limits=', time_limits)
-        ch = input()
+
         scheduler_options = compile_scheduler_options(
             scheduler_options=scheduler_options,
             search_strategy=search_strategy,
