@@ -303,8 +303,7 @@ def train_function(args, reporter, train_data, tuning_data,
     base_batch_size = cfg.optimization.per_device_batch_size
     num_accumulated = int(np.ceil(cfg.optimization.batch_size / base_batch_size))
     inference_base_batch_size = base_batch_size * cfg.optimization.val_batch_size_mult
-    print('Size of processed train data=', len(processed_train))
-    print('Size of processed dev data=', len(processed_dev))
+
     train_dataloader = DataLoader(processed_train,
                                   batch_size=base_batch_size,
                                   shuffle=True,
@@ -453,6 +452,8 @@ def train_function(args, reporter, train_data, tuning_data,
             else:
                 report_items.append((stopping_metric_scorer.name, dev_score))
             report_items.append(('exp_dir', exp_dir))
+            report_items.append(('Size of processed train data=', len(processed_train)))
+            report_items.append(('Size of processed dev data=', len(processed_dev)))
             if find_better:
                 best_report_items = report_items
             reporter(**dict(report_items))
