@@ -45,6 +45,17 @@ class RFRapidsModel(RFModel):
                        'Consider using CPU instead if model quality is not sufficient.\n'
                        '\t\tLink to issue: https://github.com/rapidsai/cuml/issues/2518')
         X = self.preprocess(X)
-        self.model = self._get_model_type()(**self.params)
+        self.model = self._get_model_type()(**self._get_model_params())
         self.model = self.model.fit(X, y)
         self.params_trained['n_estimators'] = self.model.n_estimators
+
+    # FIXME: Efficient OOF doesn't work in RAPIDS
+    @classmethod
+    def _get_default_ag_args_ensemble(cls) -> dict:
+        default_ag_args_ensemble = super()._get_default_ag_args_ensemble()
+        extra_ag_args_ensemble = {'use_child_oof': False}
+        default_ag_args_ensemble.update(extra_ag_args_ensemble)
+        return default_ag_args_ensemble
+
+    def _more_tags(self):
+        return {'valid_oof': False}

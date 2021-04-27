@@ -1,4 +1,4 @@
-from autogluon.core.constants import BINARY, MULTICLASS, REGRESSION
+from autogluon.core.constants import BINARY, MULTICLASS, REGRESSION, QUANTILE
 
 # TODO this method is generalizable and potentially should be moved out into framework
 def get_param_baseline(problem_type, num_classes=None):
@@ -8,6 +8,8 @@ def get_param_baseline(problem_type, num_classes=None):
         return get_param_multiclass_baseline()
     elif problem_type == REGRESSION:
         return get_param_regression_baseline()
+    elif problem_type == QUANTILE:
+        return get_param_quantile_baseline()
     else:
         return get_param_binary_baseline()
 
@@ -18,7 +20,7 @@ def get_param_multiclass_baseline():
         # See docs: https://docs.fast.ai/tabular.models.html
         'layers': None,  # layers configuration; None - use model's heuristics
         'emb_drop': 0.1,  # embedding layers dropout
-        'ps': [0.1],  # linear layers dropout
+        'ps': 0.1,  # linear layers dropout
         'bs': 256,  # batch size
 
         # maximum learning rate for one cycle policy https://docs.fast.ai/train.html#fit_one_cycle
@@ -42,4 +44,8 @@ def get_param_binary_baseline():
 
 
 def get_param_regression_baseline():
+    return get_param_multiclass_baseline()
+
+
+def get_param_quantile_baseline():
     return get_param_multiclass_baseline()

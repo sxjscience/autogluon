@@ -4,7 +4,7 @@ import pickle
 from collections import OrderedDict
 import numpy as np
 
-from .bayesopt.autogluon.debug_log import DebugLogPrinter
+from .bayesopt.utils.debug_log import DebugLogPrinter
 from ..utils import DeprecationHelper
 
 __all__ = ['BaseSearcher',
@@ -55,7 +55,10 @@ class BaseSearcher(object):
         from ..scheduler import FIFOScheduler
         from ..scheduler.seq_scheduler import LocalSequentialScheduler
 
-        if isinstance(scheduler, FIFOScheduler) or isinstance(scheduler, LocalSequentialScheduler):
+        if isinstance(scheduler, FIFOScheduler):
+            self._reward_attribute = scheduler._reward_attr
+            self._constraint_attribute = scheduler._constraint_attr
+        if isinstance(scheduler, LocalSequentialScheduler):
             self._reward_attribute = scheduler._reward_attr
 
     @staticmethod

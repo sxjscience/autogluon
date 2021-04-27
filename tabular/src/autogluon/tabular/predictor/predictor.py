@@ -13,7 +13,7 @@ import networkx as nx
 from autogluon.core.data.label_cleaner import LabelCleanerMulticlassToBinary
 from autogluon.core.dataset import TabularDataset
 from autogluon.core.scheduler.scheduler_factory import scheduler_factory
-from autogluon.core.constants import BINARY, MULTICLASS, REGRESSION, AUTO_WEIGHT, BALANCE_WEIGHT
+from autogluon.core.constants import BINARY, MULTICLASS, REGRESSION, QUANTILE, AUTO_WEIGHT, BALANCE_WEIGHT
 from autogluon.core.utils import plot_performance_vs_trials, plot_summary_of_models, plot_tabular_models
 from autogluon.core.utils import get_pred_from_proba_df, set_logger_verbosity
 from autogluon.core.utils.loaders import load_pkl
@@ -53,14 +53,14 @@ class TabularPredictor:
     label : str
         Name of the column that contains the target variable to predict.
     problem_type : str, default = None
-        Type of prediction problem, i.e. is this a binary/multiclass classification or regression problem (options: 'binary', 'multiclass', 'regression').
+        Type of prediction problem, i.e. is this a binary/multiclass classification or regression problem (options: 'binary', 'multiclass', 'regression', 'quantile').
         If `problem_type = None`, the prediction problem type is inferred based on the label-values in provided dataset.
     eval_metric : function or str, default = None
         Metric by which predictions will be ultimately evaluated on test data.
         AutoGluon tunes factors such as hyperparameters, early-stopping, ensemble-weights, etc. in order to improve this metric on validation data.
 
         If `eval_metric = None`, it is automatically chosen based on `problem_type`.
-        Defaults to 'accuracy' for binary and multiclass classification and 'root_mean_squared_error' for regression.
+        Defaults to 'accuracy' for binary and multiclass classification, 'root_mean_squared_error' for regression, and 'pinball_loss' for quantile.
 
         Otherwise, options for classification:
             ['accuracy', 'balanced_accuracy', 'f1', 'f1_macro', 'f1_micro', 'f1_weighted',
@@ -187,8 +187,10 @@ class TabularPredictor:
 
         learner_type = kwargs.pop('learner_type', DefaultLearner)
         learner_kwargs = kwargs.pop('learner_kwargs', dict())
+        quantile_levels = kwargs.get('quantile_levels', None)
 
         self._learner: AbstractLearner = learner_type(path_context=path, label=label, feature_generator=None, eval_metric=eval_metric, problem_type=problem_type,
+                                                      quantile_levels=quantile_levels,
                                                       sample_weight=self.sample_weight, weight_evaluation=self.weight_evaluation, **learner_kwargs)
         self._learner_type = type(self._learner)
         self._trainer = None
@@ -204,6 +206,10 @@ class TabularPredictor:
     @property
     def class_labels_internal_map(self):
         return self._learner.label_cleaner.inv_map
+
+    @property
+    def quantile_levels(self):
+        return self._learner.quantile_levels
 
     @property
     def eval_metric(self):
@@ -349,8 +355,8 @@ class TabularPredictor:
                 hyperparameters = {
                     'NN': {},
                     'GBM': [
-                        {},
                         {'extra_trees': True, 'ag_args': {'name_suffix': 'XT'}},
+                        {},
                         'GBMLarge',
                     ],
                     'CAT': {},
@@ -401,7 +407,7 @@ class TabularPredictor:
                             name_main: (str) The main name of the model. Example: 'RandomForest'.
                             name_prefix: (str) Add a custom prefix to the model name. Unused by default.
                             name_suffix: (str) Add a custom suffix to the model name. Unused by default.
-                            priority: (int) Determines the order in which the model is trained. Larger values result in the model being trained earlier. Default values range from 100 (RF) to 0 (custom), dictated by model type. If you want this model to be trained first, set priority = 999.
+                            priority: (int) Determines the order in which the model is trained. Larger values result in the model being trained earlier. Default values range from 100 (KNN) to 0 (custom), dictated by model type. If you want this model to be trained first, set priority = 999.
                             problem_types: (list) List of valid problem types for the model. `problem_types=['binary']` will result in the model only being trained if `problem_type` is 'binary'.
                             disable_in_hpo: (bool) If True, the model will only be trained if `hyperparameter_tune_kwargs=None`.
                             valid_stacker: (bool) If False, the model will not be trained as a level 2 or higher stacker model.
@@ -473,10 +479,9 @@ class TabularPredictor:
                 Hyperparameter tuning strategy and kwargs (for example, how many HPO trials to run).
                 If None, then hyperparameter tuning will not be performed.
                 Valid preset values:
-                    'auto': Uses the 'local_sequential_auto' preset.
-                    'local_sequential_auto': Performs sequential local search via bayesopt
-                    'random': Performs HPO via random search.
-                    'bayesopt': Performs HPO via bayesian optimization.
+                    'auto': Uses the 'bayesopt' preset.
+                    'random': Performs HPO via random search using local scheduler.
+                    'bayesopt': Performs HPO via bayesian optimization using local scheduler.
                 For valid dictionary keys, refer to :class:`autogluon.core.scheduler.FIFOScheduler` documentation.
                     The 'searcher' key is required when providing a dict.
             ag_args : dict, default = None
@@ -865,7 +870,7 @@ class TabularPredictor:
             If str is passed, `data` will be loaded using the str value as the file path.
         model : str (optional)
             The name of the model to get prediction probabilities from. Defaults to None, which uses the highest scoring model on the validation set.
-            Valid models are listed in this `predictor` by calling `predictor.get_model_names()`
+            Valid models are listed in this `predictor` by calling `predictor.get_model_names()`.
         as_pandas : bool, default = True
             Whether to return the output as a pandas object (True) or numpy array (False).
             Pandas object is a DataFrame if this is a multiclass problem or `as_multiclass=True`, otherwise it is a Series.
@@ -886,60 +891,66 @@ class TabularPredictor:
         data = self.__get_dataset(data)
         return self._learner.predict_proba(X=data, model=model, as_pandas=as_pandas, as_multiclass=as_multiclass)
 
-    def evaluate(self, data, silent=False):
+    def evaluate(self, data, model=None, silent=False, auxiliary_metrics=True, detailed_report=False) -> dict:
         """
         Report the predictive performance evaluated over a given dataset.
-        This is basically a shortcut for: `pred = predict(data); evaluate_predictions(data[label], preds, auxiliary_metrics=False)`
-        that automatically uses `predict_proba()` instead of `predict()` when appropriate.
+        This is basically a shortcut for: `pred_proba = predict_proba(data); evaluate_predictions(data[label], pred_proba)`.
 
         Parameters
         ----------
         data : str or :class:`TabularDataset` or :class:`pd.DataFrame`
             This dataset must also contain the `label` with the same column-name as previously specified.
             If str is passed, `data` will be loaded using the str value as the file path.
-
-        silent : bool (optional)
-            Should performance results be printed?
-
-        Returns
-        -------
-        Predictive performance value on the given dataset, based on the `eval_metric` used by this Predictor.
-        """
-        data = self.__get_dataset(data)
-        perf = self._learner.score(data)
-        perf = self.eval_metric.convert_score_to_sklearn_val(perf)  # flip negative once again back to positive (so higher is no longer necessarily better)
-        if not silent:
-            print("Predictive performance on given data: %s = %s" % (self.eval_metric, perf))
-        return perf
-
-    def evaluate_predictions(self, y_true, y_pred, silent=False, auxiliary_metrics=False, detailed_report=True):
-        """
-        Evaluate the provided predictions against ground truth labels.
-        Evaluation is based on the `eval_metric` previously specifed to `fit()`, or default metrics if none was specified.
-
-        Parameters
-        ----------
-        y_true : list or :class:`np.array`
-            The ordered collection of ground-truth labels.
-        y_pred : list or :class:`np.array`
-            The ordered collection of predictions.
-            Caution: For certain types of `eval_metric` (such as 'roc_auc'), `y_pred` must be predicted-probabilities rather than predicted labels.
-        silent : bool (optional)
-            Should performance results be printed?
-        auxiliary_metrics: bool (optional)
+        model : str (optional)
+            The name of the model to get prediction probabilities from. Defaults to None, which uses the highest scoring model on the validation set.
+            Valid models are listed in this `predictor` by calling `predictor.get_model_names()`.
+        silent : bool, default = False
+            If False, performance results are printed.
+        auxiliary_metrics: bool, default = True
             Should we compute other (`problem_type` specific) metrics in addition to the default metric?
-        detailed_report : bool (optional)
+        detailed_report : bool, default = False
             Should we computed more detailed versions of the `auxiliary_metrics`? (requires `auxiliary_metrics = True`)
 
         Returns
         -------
-        Scalar performance value if `auxiliary_metrics = False`.
-        If `auxiliary_metrics = True`, returns dict where keys = metrics, values = performance along each metric.
+        Returns dict where keys = metrics, values = performance along each metric. To get the `eval_metric` score, do `output[predictor.eval_metric.name]`
+        NOTE: Metrics scores always show in higher is better form.
+        This means that metrics such as log_loss and root_mean_squared_error will have their signs FLIPPED, and values will be negative.
+        """
+        data = self.__get_dataset(data)
+        y_pred_proba = self.predict_proba(data=data, model=model)
+        return self.evaluate_predictions(y_true=data[self.label], y_pred=y_pred_proba, silent=silent, auxiliary_metrics=auxiliary_metrics, detailed_report=detailed_report)
+
+    def evaluate_predictions(self, y_true, y_pred, silent=False, auxiliary_metrics=True, detailed_report=False) -> dict:
+        """
+        Evaluate the provided prediction probabilities against ground truth labels.
+        Evaluation is based on the `eval_metric` previously specified to `fit()`, or default metrics if none was specified.
+
+        Parameters
+        ----------
+        y_true : :class:`np.array` or :class:`pd.Series`
+            The ordered collection of ground-truth labels.
+        y_pred : :class:`pd.Series` or :class:`pd.DataFrame`
+            The ordered collection of prediction probabilities or predictions.
+            Obtainable via the output of `predictor.predict_proba`.
+            Caution: For certain types of `eval_metric` (such as 'roc_auc'), `y_pred` must be predicted-probabilities rather than predicted labels.
+        silent : bool, default = False
+            If False, performance results are printed.
+        auxiliary_metrics: bool, default = True
+            Should we compute other (`problem_type` specific) metrics in addition to the default metric?
+        detailed_report : bool, default = False
+            Should we computed more detailed versions of the `auxiliary_metrics`? (requires `auxiliary_metrics = True`)
+
+        Returns
+        -------
+        Returns dict where keys = metrics, values = performance along each metric.
+        NOTE: Metrics scores always show in higher is better form.
+        This means that metrics such as log_loss and root_mean_squared_error will have their signs FLIPPED, and values will be negative.
         """
         return self._learner.evaluate_predictions(y_true=y_true, y_pred=y_pred, silent=silent,
                                                   auxiliary_metrics=auxiliary_metrics, detailed_report=detailed_report)
 
-    def leaderboard(self, data=None, extra_info=False, only_pareto_frontier=False, silent=False):
+    def leaderboard(self, data=None, extra_info=False, extra_metrics=None, only_pareto_frontier=False, silent=False):
         """
         Output summary of information about models produced during `fit()` as a :class:`pd.DataFrame`.
         Includes information on test and validation scores for all models, model training times, inference times, and stack levels.
@@ -947,7 +958,9 @@ class TabularPredictor:
             'model': The name of the model.
 
             'score_val': The validation score of the model on the 'eval_metric'.
-
+                NOTE: Metrics scores always show in higher is better form.
+                This means that metrics such as log_loss and root_mean_squared_error will have their signs FLIPPED, and values will be negative.
+                This is necessary to avoid the user needing to know the metric to understand if higher is better when looking at leaderboard.
             'pred_time_val': The inference time required to compute predictions on the validation data end-to-end.
                 Equivalent to the sum of all 'pred_time_val_marginal' values for the model and all of its base models.
             'fit_time': The fit time required to train the model end-to-end (Including base models if the model is a stack ensemble).
@@ -967,6 +980,9 @@ class TabularPredictor:
             This Dataset must also contain the label-column with the same column-name as specified during fit().
             If specified, then the leaderboard returned will contain additional columns 'score_test', 'pred_time_test', and 'pred_time_test_marginal'.
                 'score_test': The score of the model on the 'eval_metric' for the data provided.
+                    NOTE: Metrics scores always show in higher is better form.
+                    This means that metrics such as log_loss and root_mean_squared_error will have their signs FLIPPED, and values will be negative.
+                    This is necessary to avoid the user needing to know the metric to understand if higher is better when looking at leaderboard.
                 'pred_time_test': The true end-to-end wall-clock inference time of the model for the data provided.
                     Equivalent to the sum of all 'pred_time_test_marginal' values for the model and all of its base models.
                 'pred_time_test_marginal': The inference time of the model for the data provided, minus the inference time for the model's base models, if it has any.
@@ -1030,7 +1046,17 @@ class TabularPredictor:
                     If A is a descendant of B, then B is an ancestor of A.
                     If this model is deleted, then all descendant models will no longer be able to infer on new data, and their 'can_infer' values will be False.
                     A model can only have descendant models whose 'stack_level' are higher than itself.
-
+        extra_metrics : list, default = None
+            A list of metrics to calculate scores for and include in the output DataFrame.
+            Only valid when `data` is specified. The scores refer to the scores on `data` (same data as used to calculate the `score_test` column).
+            This list can contain any values which would also be valid for `eval_metric` in predictor init.
+            For example, `extra_metrics=['accuracy', 'roc_auc', 'log_loss']` would be valid in binary classification.
+            This example would return 3 additional columns in the output DataFrame, whose column names match the names of the metrics.
+            Passing `extra_metrics=[predictor.eval_metric]` would return an extra column in the name of the eval metric that has identical values to `score_test`.
+            This also works with custom metrics. If passing an object instead of a string, the column name will be equal to the `.name` attribute of the object.
+            NOTE: Metrics scores always show in higher is better form.
+            This means that metrics such as log_loss and root_mean_squared_error will have their signs FLIPPED, and values will be negative.
+            This is necessary to avoid the user needing to know the metric to understand if higher is better when looking at leaderboard.
         only_pareto_frontier : bool, default = False
             If `True`, only return model information of models in the Pareto frontier of the accuracy/latency trade-off (models which achieve the highest score within their end-to-end inference time).
             At minimum this will include the model with the highest score and the model with the lowest inference time.
@@ -1044,7 +1070,8 @@ class TabularPredictor:
         :class:`pd.DataFrame` of model performance summary information.
         """
         data = self.__get_dataset(data) if data is not None else data
-        return self._learner.leaderboard(X=data, extra_info=extra_info, only_pareto_frontier=only_pareto_frontier, silent=silent)
+        return self._learner.leaderboard(X=data, extra_info=extra_info, extra_metrics=extra_metrics,
+                                         only_pareto_frontier=only_pareto_frontier, silent=silent)
 
     def fit_summary(self, verbosity=3):
         """
@@ -1089,7 +1116,9 @@ class TabularPredictor:
             'num_bag_folds': self._trainer.k_fold,
             'max_stack_level': self._trainer.get_max_level(),
         }
-        if self.problem_type != REGRESSION:
+        if self.problem_type == QUANTILE:
+            results['num_quantiles'] = len(self.quantile_levels)
+        elif self.problem_type != REGRESSION:
             results['num_classes'] = self._trainer.num_classes
         # if hpo_used:
         #     results['hpo_results'] = self._trainer.hpo_results
@@ -1694,6 +1723,8 @@ class TabularPredictor:
 
         if self.problem_type == MULTICLASS and self._learner.label_cleaner.problem_type_transform == MULTICLASS:
             y_pred_proba_oof_transformed.columns = copy.deepcopy(self._learner.label_cleaner.ordered_class_labels_transformed)
+        elif self.problem_type == QUANTILE:
+            y_pred_proba_oof_transformed.columns = self.quantile_levels
         else:
             y_pred_proba_oof_transformed.columns = [self.label]
             y_pred_proba_oof_transformed = y_pred_proba_oof_transformed[self.label]
@@ -2134,6 +2165,7 @@ class TabularPredictor:
         valid_kwargs = {
             'learner_type',
             'learner_kwargs',
+            'quantile_levels',
         }
         invalid_keys = []
         for key in kwargs:
@@ -2198,6 +2230,9 @@ class TabularPredictor:
 
             # private
             _save_bag_folds=None,
+
+            # quantile levels
+            quantile_levels=None,
         )
 
         allowed_kwarg_names = list(fit_extra_kwargs_default.keys())

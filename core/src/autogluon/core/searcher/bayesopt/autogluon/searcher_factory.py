@@ -1,26 +1,26 @@
 from typing import Set
 import numpy as np
 
-from .debug_log import DebugLogPrinter
 from .gp_fifo_searcher import GPFIFOSearcher, map_reward, MapReward, \
     DEFAULT_INITIAL_SCORING, SUPPORTED_INITIAL_SCORING
+from .constrained_gp_fifo_searcher import ConstrainedGPFIFOSearcher
 from .gp_multifidelity_searcher import GPMultiFidelitySearcher, \
     resource_for_acquisition_bohb, resource_for_acquisition_first_milestone
-from .gp_profiling import GPMXNetSimpleProfiler
-from .hp_ranges import HyperparameterRanges_CS
 from .model_factories import resource_kernel_factory
+from ..datatypes.hp_ranges_cs import HyperparameterRanges_CS
 from ..datatypes.hp_ranges import HyperparameterRanges
 from ..gpautograd.constants import OptimizationConfig, DEFAULT_OPTIMIZATION_CONFIG
-from ..gpautograd.debug_gp_regression import DebugGPRegression
 from ..gpautograd.gp_regression import GaussianProcessRegression
 from ..gpautograd.kernel import Matern52
 from ..gpautograd.mean import ScalarMeanFunction
 from ..models.gpmodel_skipopt import SkipNoMaxResourcePredicate, SkipPeriodicallyPredicate
 from ..models.gpmodel_transformers import GPModelArgs
-from ..models.meanstd_acqfunc import EIAcquisitionFunction
-from ..tuning_algorithms.default_algorithm import DEFAULT_METRIC, \
-    DEFAULT_NUM_INITIAL_CANDIDATES, DEFAULT_NUM_INITIAL_RANDOM_EVALUATIONS
-from ....utils.default_arguments import Integer, Categorical, Boolean
+from ..models.meanstd_acqfunc_impl import EIAcquisitionFunction, CEIAcquisitionFunction
+from ..tuning_algorithms.base_classes import DEFAULT_METRIC, DEFAULT_CONSTRAINT_METRIC
+from ..tuning_algorithms.defaults import DEFAULT_NUM_INITIAL_CANDIDATES, DEFAULT_NUM_INITIAL_RANDOM_EVALUATIONS
+from ..utils.debug_log import DebugLogPrinter
+from ..utils.simple_profiler import SimpleProfiler
+from ....utils.default_arguments import Integer, Categorical, Boolean, Float
 
 __all__ = ['gp_fifo_searcher_factory',
            'gp_multifidelity_searcher_factory',
@@ -28,8 +28,35 @@ __all__ = ['gp_fifo_searcher_factory',
            'gp_multifidelity_searcher_defaults']
 
 
+def _create_gp_and_model_args(
+        hp_ranges_cs, active_metric, max_metric_value=None, is_hyperband=False, **kwargs):
+    opt_warmstart = kwargs.get('opt_warmstart', False)
+    random_seed = kwargs.get('random_seed', 31415927)
+    kernel = Matern52(dimension=hp_ranges_cs.ndarray_size(), ARD=True)
+    mean = ScalarMeanFunction()
+    if is_hyperband:
+        kernel, mean = resource_kernel_factory(
+            kwargs['gp_resource_kernel'],
+            kernel_x=kernel, mean_x=mean,
+            max_metric_value=max_metric_value)
+    optimization_config = OptimizationConfig(
+        lbfgs_tol=DEFAULT_OPTIMIZATION_CONFIG.lbfgs_tol,
+        lbfgs_maxiter=kwargs['opt_maxiter'],
+        verbose=kwargs['opt_verbose'],
+        n_starts=kwargs['opt_nstarts'])
+    gpmodel = GaussianProcessRegression(
+        kernel=kernel, mean=mean,
+        optimization_config=optimization_config,
+        fit_reset_params=not opt_warmstart)
+    model_args = GPModelArgs(
+        num_fantasy_samples=kwargs['num_fantasy_samples'],
+        random_seed=random_seed,
+        active_metric=active_metric,
+        normalize_targets=True)
+    return gpmodel, model_args
+
+
 def _create_common_objects(**kwargs):
-    # TODO: Validity checks on kwargs arguments
     scheduler = kwargs['scheduler']
     config_space = kwargs['configspace']
     is_hyperband = scheduler.startswith('hyperband')
@@ -59,7 +86,7 @@ def _create_common_objects(**kwargs):
         skip_optimization = None
     # Profiler
     if kwargs.get('profiler', False):
-        profiler = GPMXNetSimpleProfiler()
+        profiler = SimpleProfiler()
     else:
         profiler = None
     # Conversion from reward to metric (strictly decreasing) and back
@@ -81,36 +108,13 @@ def _create_common_objects(**kwargs):
         max_metric_value = _map_reward(min_reward)
     else:
         max_metric_value = None
-    opt_warmstart = kwargs.get('opt_warmstart', False)
-
     # Underlying GP regression model
-    kernel = Matern52(dimension=hp_ranges_cs.ndarray_size(), ARD=True)
-    mean = ScalarMeanFunction()
-    if is_hyperband:
-        kernel, mean = resource_kernel_factory(
-            kwargs['gp_resource_kernel'],
-            kernel_x=kernel, mean_x=mean,
-            max_metric_value=max_metric_value)
-    optimization_config = OptimizationConfig(
-        lbfgs_tol=DEFAULT_OPTIMIZATION_CONFIG.lbfgs_tol,
-        lbfgs_maxiter=kwargs['opt_maxiter'],
-        verbose=kwargs['opt_verbose'],
-        n_starts=kwargs['opt_nstarts'])
-    debug_writer = None
-    if kwargs.get('opt_debug_writer', False):
-        fname_msk = kwargs.get('opt_debug_writer_fmask', 'debug_gpr_{}')
-        debug_writer = DebugGPRegression(
-            fname_msk=fname_msk, rolling_size=5)
-    gpmodel = GaussianProcessRegression(
-        kernel=kernel, mean=mean,
-        optimization_config=optimization_config,
-        fit_reset_params=not opt_warmstart,
-        debug_writer=debug_writer)
-    model_args = GPModelArgs(
-        num_fantasy_samples=kwargs['num_fantasy_samples'],
-        random_seed=random_seed,
+    gpmodel, model_args = _create_gp_and_model_args(
+        hp_ranges_cs=hp_ranges_cs,
         active_metric=DEFAULT_METRIC,
-        normalize_targets=True)
+        max_metric_value=max_metric_value,
+        is_hyperband=is_hyperband,
+        **kwargs)
     debug_log = DebugLogPrinter() if kwargs.get('debug_log', False) else None
 
     return hp_ranges_cs, random_seed, gpmodel, model_args, profiler, \
@@ -135,7 +139,7 @@ def gp_fifo_searcher_factory(**kwargs) -> GPFIFOSearcher:
     :return: GPFIFOSearcher object
 
     """
-    assert kwargs['scheduler'] == 'fifo', \
+    assert kwargs['scheduler'] in ['fifo', 'local'], \
         "This factory needs scheduler = 'fifo' (instead of '{}')".format(
             kwargs['scheduler'])
     # Common objects
@@ -156,8 +160,65 @@ def gp_fifo_searcher_factory(**kwargs) -> GPFIFOSearcher:
         initial_scoring=kwargs['initial_scoring'],
         profiler=profiler,
         first_is_default=kwargs['first_is_default'],
-        debug_log=debug_log)
+        debug_log=debug_log,
+        cost_metric_name=kwargs.get('cost_metric_name'))
     return gp_searcher
+
+
+def _resource_for_acquisition(kwargs, hp_ranges_cs):
+    _resource_acq = kwargs.get('resource_acq', 'bohb')
+    if _resource_acq == 'bohb':
+        threshold = kwargs.get(
+            'resource_acq_bohb_threshold', hp_ranges_cs.ndarray_size())
+        resource_for_acquisition = resource_for_acquisition_bohb(
+            threshold=threshold)
+    else:
+        assert _resource_acq == 'first', \
+            "resource_acq must be 'bohb' or 'first'"
+        resource_for_acquisition = resource_for_acquisition_first_milestone
+    return resource_for_acquisition
+
+
+def constrained_gp_fifo_searcher_factory(**kwargs) -> ConstrainedGPFIFOSearcher:
+    """
+    Creates ConstrainedGPFIFOSearcher object, based on kwargs equal to search_options
+    passed to and extended by scheduler (see FIFOScheduler).
+
+    :param kwargs: search_options coming from scheduler
+    :return: ConstrainedGPFIFOSearcher object
+
+    """
+    assert kwargs['scheduler'] == 'fifo', \
+        "This factory needs scheduler = 'fifo' (instead of '{}')".format(
+            kwargs['scheduler'])
+    # Common objects
+    hp_ranges_cs, random_seed, gpmodel, model_args, profiler, _map_reward, \
+    skip_optimization, debug_log = _create_common_objects(**kwargs)
+    initial_scoring = kwargs.get('initial_scoring', 'acq_func')
+    # We need two GP models: one for active metric (gpmodel), the other for constraint metric (gpmodel_constraint)
+    gpmodel_constraint, model_args_constraint = _create_gp_and_model_args(
+        hp_ranges_cs=hp_ranges_cs,
+        active_metric=DEFAULT_CONSTRAINT_METRIC,
+        **kwargs)
+    output_gpmodels = {DEFAULT_METRIC: gpmodel,
+                       DEFAULT_CONSTRAINT_METRIC: gpmodel_constraint}
+    output_model_args = {DEFAULT_METRIC: model_args,
+                         DEFAULT_CONSTRAINT_METRIC: model_args_constraint}
+    constrained_gp_searcher = ConstrainedGPFIFOSearcher(
+        hp_ranges=hp_ranges_cs,
+        random_seed=random_seed,
+        output_gpmodels=output_gpmodels,
+        output_models_args=output_model_args,
+        map_reward=_map_reward,
+        acquisition_class=CEIAcquisitionFunction,
+        skip_optimization=skip_optimization,
+        num_initial_candidates=kwargs['num_init_candidates'],
+        num_initial_random_choices=kwargs['num_init_random'],
+        initial_scoring=initial_scoring,
+        profiler=profiler,
+        first_is_default=kwargs['first_is_default'],
+        debug_log=debug_log)
+    return constrained_gp_searcher
 
 
 def gp_multifidelity_searcher_factory(**kwargs) -> GPMultiFidelitySearcher:
@@ -178,14 +239,7 @@ def gp_multifidelity_searcher_factory(**kwargs) -> GPMultiFidelitySearcher:
     skip_optimization, debug_log = \
         _create_common_objects(**kwargs)
 
-    _resource_acq = kwargs.get('resource_acq', 'bohb')
-    if _resource_acq == 'bohb':
-        resource_for_acquisition = resource_for_acquisition_bohb(
-            threshold=hp_ranges_cs.ndarray_size())
-    else:
-        assert _resource_acq == 'first', \
-            "resource_acq must be 'bohb' or 'first'"
-        resource_for_acquisition = resource_for_acquisition_first_milestone
+    resource_for_acquisition = _resource_for_acquisition(kwargs, hp_ranges_cs)
     epoch_range = (kwargs['min_epochs'], kwargs['max_epochs'])
     gp_searcher = GPMultiFidelitySearcher(
         hp_ranges=hp_ranges_cs,
@@ -203,11 +257,12 @@ def gp_multifidelity_searcher_factory(**kwargs) -> GPMultiFidelitySearcher:
         initial_scoring=kwargs['initial_scoring'],
         profiler=profiler,
         first_is_default=kwargs['first_is_default'],
-        debug_log=debug_log)
+        debug_log=debug_log,
+        cost_metric_name=kwargs.get('cost_metric_name'))
     return gp_searcher
 
 
-def _common_defaults(is_hyperband: bool) -> (Set[str], dict, dict):
+def _common_defaults(is_hyperband: bool, is_constrained: bool) -> (Set[str], dict, dict):
     mandatory = set()
 
     default_options = {
@@ -226,12 +281,15 @@ def _common_defaults(is_hyperband: bool) -> (Set[str], dict, dict):
         'num_init_candidates': DEFAULT_NUM_INITIAL_CANDIDATES,
         'initial_scoring': DEFAULT_INITIAL_SCORING,
         'first_is_default': True,
-        'debug_log': False}
+        'debug_log': False,
+        'cost_metric_name': 'elapsed_time'}
     if is_hyperband:
         default_options['opt_skip_num_max_resource'] = False
         default_options['gp_resource_kernel'] = 'matern52'
         default_options['resource_acq'] = 'bohb'
         default_options['num_init_random'] = 10
+    if is_constrained:
+        default_options['initial_scoring'] = 'acq_func'
 
     constraints = {
         'random_seed': Integer(),
@@ -270,7 +328,19 @@ def gp_fifo_searcher_defaults() -> (Set[str], dict, dict):
     :return: (mandatory, default_options, config_space)
 
     """
-    return _common_defaults(is_hyperband=False)
+    return _common_defaults(is_hyperband=False, is_constrained=False)
+
+
+def constrained_gp_fifo_searcher_defaults() -> (Set[str], dict, dict):
+    """
+    Returns mandatory, default_options, config_space for
+    check_and_merge_defaults to be applied to search_options for
+    ConstrainedGPFIFOSearcher.
+
+    :return: (mandatory, default_options, config_space)
+
+    """
+    return _common_defaults(is_hyperband=False, is_constrained=True)
 
 
 def gp_multifidelity_searcher_defaults() -> (Set[str], dict, dict):
@@ -282,4 +352,4 @@ def gp_multifidelity_searcher_defaults() -> (Set[str], dict, dict):
     :return: (mandatory, default_options, config_space)
 
     """
-    return _common_defaults(is_hyperband=True)
+    return _common_defaults(is_hyperband=True, is_constrained=False)

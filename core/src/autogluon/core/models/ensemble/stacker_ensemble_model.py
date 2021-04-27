@@ -8,7 +8,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-from ...constants import MULTICLASS, SOFTCLASS
+from ...constants import MULTICLASS, SOFTCLASS, QUANTILE
 from ...features.feature_metadata import FeatureMetadata
 from ...features.types import R_FLOAT, S_STACK
 
@@ -118,7 +118,7 @@ class StackerEnsembleModel(BaggedEnsembleModel):
         return X
 
     def pred_probas_to_df(self, pred_proba: list, index=None) -> pd.DataFrame:
-        if self.problem_type in [MULTICLASS, SOFTCLASS]:
+        if self.problem_type in [MULTICLASS, SOFTCLASS, QUANTILE]:
             pred_proba = np.concatenate(pred_proba, axis=1)
             pred_proba = pd.DataFrame(pred_proba, columns=self.stack_columns)
         else:
@@ -134,8 +134,8 @@ class StackerEnsembleModel(BaggedEnsembleModel):
              time_limit=None,
              **kwargs):
         start_time = time.time()
-        # TODO: This could be preprocess=True in general, just have preprocess=False for child models
-        X = self.preprocess(X=X, preprocess=False, fit=True, compute_base_preds=compute_base_preds)
+        # TODO: This could be preprocess_nonadaptive=True in general, just have preprocess_nonadaptive=False for child models
+        X = self.preprocess(X=X, preprocess_nonadaptive=False, fit=True, compute_base_preds=compute_base_preds)
         if time_limit is not None:
             time_limit = time_limit - (time.time() - start_time)
         self._add_stack_to_feature_metadata()
@@ -152,6 +152,9 @@ class StackerEnsembleModel(BaggedEnsembleModel):
         if self.problem_type in [MULTICLASS, SOFTCLASS]:
             stack_columns = [stack_column_prefix + '_' + str(cls) for stack_column_prefix in stack_column_prefix_lst for cls in range(self.num_classes)]
             num_pred_cols_per_model = self.num_classes
+        elif self.problem_type == QUANTILE:
+            stack_columns = [stack_column_prefix + '_' + str(q) for stack_column_prefix in stack_column_prefix_lst for q in self.quantile_levels]
+            num_pred_cols_per_model = len(self.quantile_levels)
         else:
             stack_columns = stack_column_prefix_lst
             num_pred_cols_per_model = 1

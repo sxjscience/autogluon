@@ -4,7 +4,7 @@ import logging
 from collections import defaultdict
 
 from autogluon.core.metrics import mean_squared_error
-from autogluon.core.constants import AG_ARGS, AG_ARGS_FIT, AG_ARGS_ENSEMBLE, BINARY, MULTICLASS, REGRESSION, SOFTCLASS
+from autogluon.core.constants import AG_ARGS, AG_ARGS_FIT, AG_ARGS_ENSEMBLE, BINARY, MULTICLASS, REGRESSION, SOFTCLASS, QUANTILE
 from autogluon.core.models import AbstractModel, GreedyWeightedEnsembleModel, StackerEnsembleModel
 
 from .presets_custom import get_preset_custom
@@ -17,15 +17,15 @@ logger = logging.getLogger(__name__)
 
 # Higher values indicate higher priority, priority dictates the order models are trained for a given level.
 DEFAULT_MODEL_PRIORITY = dict(
-    RF=100,
-    XT=90,
-    KNN=80,
-    GBM=70,
-    CAT=60,
-    XGB=55,
-    NN=50,
-    FASTAI=45,
-    LR=40,
+    KNN=100,
+    GBM=90,
+    RF=80,
+    CAT=70,
+    XT=60,
+    FASTAI=50,
+    XGB=40,
+    LR=30,
+    NN=20,
     FASTTEXT=0,
     AG_TEXT_NN=0,
     TRANSF=0,
@@ -35,9 +35,7 @@ DEFAULT_MODEL_PRIORITY = dict(
 # Problem type specific model priority overrides (will update default values in DEFAULT_MODEL_PRIORITY)
 PROBLEM_TYPE_MODEL_PRIORITY = {
     MULTICLASS: dict(
-        NN=120,
-        FASTAI=115,
-        KNN=110,
+        FASTAI=95,
     ),
 }
 
@@ -50,6 +48,8 @@ DEFAULT_SOFTCLASS_PRIORITY = dict(
 )
 
 DEFAULT_CUSTOM_MODEL_PRIORITY = 0
+
+DEFAULT_QUANTILE_MODEL = ['RF', 'XT', 'ENS_WEIGHTED']  # TODO: OTHERS will be added
 
 MODEL_TYPES = dict(
     RF=RFModel,
@@ -116,7 +116,7 @@ VALID_AG_ARGS_KEYS = {
 # DONE: Add banned_model_types arg
 # TODO: Add option to update hyperparameters with only added keys, so disabling CatBoost would just be {'CAT': []}, which keeps the other models as is.
 # TODO: special optional AG arg for only training model if eval_metric in list / not in list. Useful for F1 and 'is_unbalanced' arg in LGBM.
-def get_preset_models(path, problem_type, eval_metric, hyperparameters, feature_metadata=None, num_classes=None,
+def get_preset_models(path, problem_type, eval_metric, hyperparameters, feature_metadata=None, num_classes=None, quantile_levels=None,
                       level: int = 1, ensemble_type=StackerEnsembleModel, ensemble_kwargs: dict = None, ag_args_fit=None, ag_args=None, ag_args_ensemble=None,
                       name_suffix: str = None, default_priorities=None, invalid_model_names: list = None, excluded_model_types: list = None,
                       hyperparameter_preprocess_func=None, hyperparameter_preprocess_kwargs=None, silent=True):
@@ -125,7 +125,7 @@ def get_preset_models(path, problem_type, eval_metric, hyperparameters, feature_
         if hyperparameter_preprocess_kwargs is None:
             hyperparameter_preprocess_kwargs = dict()
         hyperparameters = hyperparameter_preprocess_func(hyperparameters, **hyperparameter_preprocess_kwargs)
-    if problem_type not in [BINARY, MULTICLASS, REGRESSION, SOFTCLASS]:
+    if problem_type not in [BINARY, MULTICLASS, REGRESSION, SOFTCLASS, QUANTILE]:
         raise NotImplementedError
     invalid_name_set = set()
     if invalid_model_names is not None:
@@ -145,6 +145,9 @@ def get_preset_models(path, problem_type, eval_metric, hyperparameters, feature_
     hp_level = hyperparameters[level_key]
     model_cfg_priority_dict = defaultdict(list)
     for model_type in hp_level:
+        if problem_type == QUANTILE and model_type not in DEFAULT_QUANTILE_MODEL:
+            logger.warning(f"Model type '{model_type}' does not support `problem_type='{QUANTILE}'` yet. This model will be ignored.")
+            continue
         models_of_type = hp_level[model_type]
         if not isinstance(models_of_type, list):
             models_of_type = [models_of_type]
@@ -187,7 +190,8 @@ def get_preset_models(path, problem_type, eval_metric, hyperparameters, feature_
     model_args_fit = {}
     for model_cfg in model_cfg_priority_list:
         model = model_factory(model_cfg, path=path, problem_type=problem_type, eval_metric=eval_metric,
-                              num_classes=num_classes, name_suffix=name_suffix, ensemble_type=ensemble_type, ensemble_kwargs=ensemble_kwargs,
+                              num_classes=num_classes, quantile_levels=quantile_levels,
+                              name_suffix=name_suffix, ensemble_type=ensemble_type, ensemble_kwargs=ensemble_kwargs,
                               invalid_name_set=invalid_name_set, level=level, feature_metadata=feature_metadata)
         invalid_name_set.add(model.name)
         if 'hyperparameter_tune_kwargs' in model_cfg[AG_ARGS]:
@@ -222,6 +226,7 @@ def clean_model_cfg(model_cfg: dict, model_type=None, ag_args=None, ag_args_ense
         model_extra_ag_args = ag_args.copy()
         model_extra_ag_args.update(model_cfg[AG_ARGS])
         model_cfg[AG_ARGS] = model_extra_ag_args
+    default_ag_args_ensemble = model_type_real._get_default_ag_args_ensemble()
     if ag_args_ensemble is not None:
         model_extra_ag_args_ensemble = ag_args_ensemble.copy()
         model_extra_ag_args_ensemble.update(model_cfg.get(AG_ARGS_ENSEMBLE, dict()))
@@ -235,6 +240,9 @@ def clean_model_cfg(model_cfg: dict, model_type=None, ag_args=None, ag_args_ense
     if default_ag_args is not None:
         default_ag_args.update(model_cfg[AG_ARGS])
         model_cfg[AG_ARGS] = default_ag_args
+    if default_ag_args_ensemble is not None:
+        default_ag_args_ensemble.update(model_cfg.get(AG_ARGS_ENSEMBLE, dict()))
+        model_cfg[AG_ARGS_ENSEMBLE] = default_ag_args_ensemble
     return model_cfg
 
 
@@ -260,7 +268,7 @@ def is_model_cfg_valid(model_cfg, level=1, problem_type=None):
 
 
 def model_factory(
-        model, path, problem_type, eval_metric, num_classes=None,
+        model, path, problem_type, eval_metric, num_classes=None, quantile_levels=None,
         name_suffix=None, ensemble_type=StackerEnsembleModel, ensemble_kwargs=None,
         invalid_name_set=None, level=1, feature_metadata=None,
 ):
@@ -295,7 +303,9 @@ def model_factory(
     model_params = copy.deepcopy(model)
     model_params.pop(AG_ARGS, None)
     model_params.pop(AG_ARGS_ENSEMBLE, None)
-    model_init = model_type(path=path, name=name, problem_type=problem_type, eval_metric=eval_metric, num_classes=num_classes, hyperparameters=model_params, feature_metadata=feature_metadata)
+    model_init = model_type(path=path, name=name, problem_type=problem_type, eval_metric=eval_metric,
+                            quantile_levels=quantile_levels, num_classes=num_classes,
+                            hyperparameters=model_params, feature_metadata=feature_metadata)
 
     if ensemble_kwargs is not None:
         ensemble_kwargs_model = copy.deepcopy(ensemble_kwargs)
@@ -304,7 +314,8 @@ def model_factory(
         if ensemble_kwargs_model['hyperparameters'] is None:
             ensemble_kwargs_model['hyperparameters'] = {}
         ensemble_kwargs_model['hyperparameters'].update(extra_ensemble_hyperparameters)
-        model_init = ensemble_type(path=path, name=name_stacker, model_base=model_init, num_classes=num_classes, **ensemble_kwargs_model)
+        model_init = ensemble_type(path=path, name=name_stacker, model_base=model_init,
+                                   quantile_levels=quantile_levels, num_classes=num_classes, **ensemble_kwargs_model)
 
     return model_init
 

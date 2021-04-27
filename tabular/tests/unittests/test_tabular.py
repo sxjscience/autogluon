@@ -29,7 +29,7 @@ import pandas as pd
 import pytest
 
 import autogluon.core as ag
-from autogluon.core.constants import BINARY, MULTICLASS, REGRESSION
+from autogluon.core.constants import BINARY, MULTICLASS, REGRESSION, QUANTILE
 from autogluon.tabular import TabularDataset, TabularPredictor
 
 
@@ -84,11 +84,13 @@ def test_advanced_functionality():
     shutil.rmtree(savedir, ignore_errors=True)  # Delete AutoGluon output directory to ensure previous runs' information has been removed.
     predictor = TabularPredictor(label=label, path=savedir).fit(train_data)
     leaderboard = predictor.leaderboard(data=test_data)
-    leaderboard_extra = predictor.leaderboard(data=test_data, extra_info=True)
+    extra_metrics = ['accuracy', 'roc_auc', 'log_loss']
+    leaderboard_extra = predictor.leaderboard(data=test_data, extra_info=True, extra_metrics=extra_metrics)
     assert set(predictor.get_model_names()) == set(leaderboard['model'])
     assert set(predictor.get_model_names()) == set(leaderboard_extra['model'])
     assert set(leaderboard_extra.columns).issuperset(set(leaderboard.columns))
     assert len(leaderboard) == len(leaderboard_extra)
+    assert set(leaderboard_extra.columns).issuperset(set(extra_metrics))  # Assert that extra_metrics are present in output
     num_models = len(predictor.get_model_names())
     feature_importances = predictor.feature_importance(data=test_data)
     original_features = set(train_data.columns)
@@ -279,9 +281,9 @@ def run_tabular_benchmarks(fast_benchmark, subsample_size, perf_threshold, seed_
             y_pred = predictor.predict(test_data)
             perf_dict = predictor.evaluate_predictions(y_true=y_test, y_pred=y_pred, auxiliary_metrics=True)
             if dataset['problem_type'] != REGRESSION:
-                perf = 1.0 - perf_dict['accuracy_score'] # convert accuracy to error-rate
+                perf = 1.0 - perf_dict['accuracy']  # convert accuracy to error-rate
             else:
-                perf = 1.0 - perf_dict['r2_score'] # unexplained variance score.
+                perf = 1.0 - perf_dict['r2']  # unexplained variance score.
             performance_vals[idx] = perf
             print("Performance on dataset %s: %s   (previous perf=%s)" % (dataset['name'], performance_vals[idx], dataset['performance_val']))
             if (not fast_benchmark) and (performance_vals[idx] > dataset['performance_val'] * perf_threshold):
@@ -373,7 +375,7 @@ def test_tabularHPObagstack():
     perf_threshold = 1.1 # How much worse can performance on each dataset be vs previous performance without warning
     seed_val = 10000 # random seed
     subsample_size = None
-    hyperparameter_tune_kwargs = {'searcher': 'local_sequential_auto'}
+    hyperparameter_tune_kwargs = {'scheduler': 'local', 'searcher': 'auto'}
     num_stack_levels = 2
     num_bag_folds = 2
     verbosity = 2 # how much output to print
@@ -415,7 +417,7 @@ def test_tabularHPO():
     perf_threshold = 1.1 # How much worse can performance on each dataset be vs previous performance without warning
     seed_val = 99 # random seed
     subsample_size = None
-    hyperparameter_tune_kwargs = {'searcher': 'local_sequential_auto'}
+    hyperparameter_tune_kwargs = {'scheduler': 'local', 'searcher': 'auto'}
     verbosity = 2 # how much output to print
     hyperparameters = None
     time_limit = None
@@ -511,11 +513,32 @@ def test_sample_weight():
     ldr = predictor.leaderboard(test_data)
     perf = predictor.evaluate(test_data)
     # Run again with weight_evaluation:
+    # FIXME: RMSE doesn't support sample_weight, this entire call doesn't make sense
     predictor = TabularPredictor(label=dataset['label'], path=savedir, problem_type=dataset['problem_type'], sample_weight=sample_weight, weight_evaluation=True).fit(train_data, **fit_args)
-    perf = predictor.evaluate(test_data_weighted)
+    # perf = predictor.evaluate(test_data_weighted)  # TODO: Doesn't work without implementing sample_weight in evaluate
     predictor.distill(time_limit=10)
     ldr = predictor.leaderboard(test_data_weighted)
 
+
+def test_quantile():
+    quantile_levels = [0.01, 0.02, 0.05, 0.98, 0.99]
+    dataset = {'url': 'https://autogluon.s3.amazonaws.com/datasets/toyRegression.zip',
+               'name': 'toyRegression',
+               'problem_type': QUANTILE,
+               'label': 'y'}
+    directory_prefix = './datasets/'
+    train_file = 'train_data.csv'
+    test_file = 'test_data.csv'
+    train_data, test_data = load_data(directory_prefix=directory_prefix, train_file=train_file, test_file=test_file, name=dataset['name'], url=dataset['url'])
+    print(f"Evaluating Benchmark Dataset {dataset['name']}")
+    directory = directory_prefix + dataset['name'] + "/"
+    savedir = directory + 'AutogluonOutput/'
+    shutil.rmtree(savedir, ignore_errors=True)  # Delete AutoGluon output directory to ensure previous runs' information has been removed.
+    fit_args = {'time_limit': 20}
+    predictor = TabularPredictor(label=dataset['label'], path=savedir, problem_type=dataset['problem_type'],
+                                 quantile_levels=quantile_levels).fit(train_data, **fit_args)
+    ldr = predictor.leaderboard(test_data)
+    perf = predictor.evaluate(test_data)
 
 
 @pytest.mark.skip(reason="Ignored for now, since stacking is disabled without bagging.")

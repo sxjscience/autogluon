@@ -10,13 +10,13 @@ from autogluon.core.searcher.bayesopt.datatypes.tuning_job_state import \
     TuningJobState
 from autogluon.core.searcher.bayesopt.gpautograd.constants import \
     DEFAULT_MCMC_CONFIG, DEFAULT_OPTIMIZATION_CONFIG
-from autogluon.core.searcher.bayesopt.models.meanstd_acqfunc import \
+from autogluon.core.searcher.bayesopt.models.meanstd_acqfunc_impl import \
     EIAcquisitionFunction
 from autogluon.core.searcher.bayesopt.models.gp_model import \
     GaussProcSurrogateModel
 from autogluon.core.searcher.bayesopt.tuning_algorithms.bo_algorithm_components import \
     LBFGSOptimizeAcquisition
-from autogluon.core.searcher.bayesopt.tuning_algorithms.default_algorithm import \
+from autogluon.core.searcher.bayesopt.tuning_algorithms.base_classes import \
     dictionarize_objective, DEFAULT_METRIC
 from autogluon.core.searcher.bayesopt.utils.test_objects import \
     default_gpmodel, default_gpmodel_mcmc

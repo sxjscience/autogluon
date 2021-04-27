@@ -3,19 +3,19 @@ import numpy as np
 import logging
 
 from .model_base import BaseSurrogateModel
-from ..autogluon.debug_log import DebugLogPrinter
-from ..autogluon.gp_profiling import GPMXNetSimpleProfiler
-from ..autogluon.hp_ranges import HyperparameterRanges_CS
 from ..datatypes.common import FantasizedPendingEvaluation, Candidate
+from ..datatypes.hp_ranges_cs import HyperparameterRanges_CS
 from ..datatypes.tuning_job_state import TuningJobState
 from ..gpautograd.gp_regression import GaussianProcessRegression
 from ..gpautograd.gpr_mcmc import GPRegressionMCMC
 from ..gpautograd.posterior_state import GaussProcPosteriorState
+from ..utils.debug_log import DebugLogPrinter
+from ..utils.simple_profiler import SimpleProfiler
+from ..tuning_algorithms.base_classes import DEFAULT_METRIC
 
 logger = logging.getLogger(__name__)
 
 GPModel = Union[GaussianProcessRegression, GPRegressionMCMC]
-
 
 class InternalCandidateEvaluations(NamedTuple):
     X: np.ndarray
@@ -73,7 +73,7 @@ class GaussProcSurrogateModel(BaseSurrogateModel):
             self, state: TuningJobState, active_metric: str, random_seed: int,
             gpmodel: GPModel, fit_parameters: bool, num_fantasy_samples: int,
             normalize_targets: bool = True,
-            profiler: GPMXNetSimpleProfiler = None,
+            profiler: SimpleProfiler = None,
             debug_log: Optional[DebugLogPrinter] = None,
             debug_fantasy_values = None):
         """
@@ -182,7 +182,7 @@ class GaussProcSurrogateModel(BaseSurrogateModel):
         self._gpmodel.set_params(param_dict)
 
     def _compute_posterior(
-            self, fit_parameters: bool, profiler: GPMXNetSimpleProfiler):
+            self, fit_parameters: bool, profiler: SimpleProfiler):
         """
         Completes __init__, by computing the posterior. If fit_parameters, this
         includes optimizing the surrogate model parameters.
@@ -227,7 +227,7 @@ class GaussProcSurrogateModel(BaseSurrogateModel):
 
     def _posterior_for_state(
             self, state: TuningJobState, fit_parameters: bool,
-            profiler: Optional[GPMXNetSimpleProfiler]):
+            profiler: Optional[SimpleProfiler]):
         """
         Computes posterior for state.
         If fit_parameters and state.pending_evaluations is empty, we first
@@ -253,7 +253,7 @@ class GaussProcSurrogateModel(BaseSurrogateModel):
             logger.log(15, "Recomputing GP state")
             self._gpmodel.recompute_states(X_all, Y_all, profiler=profiler)
         else:
-            logger.log(15, "Fitting GP model")
+            logger.log(15, f"Fitting GP model for {self.active_metric}")
             self._gpmodel.fit(X_all, Y_all, profiler=profiler)
         if self._debug_log is not None:
             self._debug_log.set_gp_params(self.get_params())
@@ -311,7 +311,7 @@ class GaussProcSurrogateModel(BaseSurrogateModel):
         else:
             return []
 
-    def _current_best_filter_candidates(self, candidates):
+    def current_best_filter_candidates(self, candidates):
         hp_ranges = self.state.hp_ranges
         if isinstance(hp_ranges, HyperparameterRanges_CS):
             candidates = hp_ranges.filter_for_last_pos_value(candidates)
@@ -321,3 +321,19 @@ class GaussProcSurrogateModel(BaseSurrogateModel):
                 "'{}' = {}".format(
                     hp_ranges.name_last_pos, hp_ranges.value_for_last_pos)
         return candidates
+
+
+# Convenience type allowing for multi-output HPO. This is used for methods that work both in the standard case
+# of a single output model and in the multi-output case (e.g., see GPModelPendingCandidateStateTransformer)
+GaussProcSurrogateOutputModel = Union[GaussProcSurrogateModel, Dict[str, GaussProcSurrogateModel]]
+
+
+class GPModelArgs(NamedTuple):
+    num_fantasy_samples: int
+    random_seed: int
+    active_metric: str = DEFAULT_METRIC
+    normalize_targets: bool = True
+
+
+GPModelArgsOutput = Union[GPModelArgs, Dict[str, GPModelArgs]]
+GPOutputModel = Union[GPModel, Dict[str, GPModel]]

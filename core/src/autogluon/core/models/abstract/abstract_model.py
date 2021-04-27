@@ -1,5 +1,6 @@
 import copy
 import gc
+import inspect
 import logging
 import os
 import pickle
@@ -11,9 +12,10 @@ from typing import Union
 import numpy as np
 import pandas as pd
 
+from ._tags import _DEFAULT_TAGS
 from .model_trial import model_trial
 from ... import metrics, Space
-from ...constants import AG_ARGS_FIT, BINARY, REGRESSION, REFIT_FULL_SUFFIX, OBJECTIVES_TO_NORMALIZE
+from ...constants import AG_ARGS_FIT, BINARY, REGRESSION, QUANTILE, REFIT_FULL_SUFFIX, OBJECTIVES_TO_NORMALIZE
 from ...features.feature_metadata import FeatureMetadata
 from ...features.types import R_CATEGORY, R_OBJECT, R_FLOAT, R_INT
 from ...scheduler import FIFOScheduler
@@ -60,6 +62,8 @@ class AbstractModel:
             'precision_weighted', 'recall', 'recall_macro', 'recall_micro', 'recall_weighted', 'log_loss', 'pac_score']
         Options for regression:
             ['root_mean_squared_error', 'mean_squared_error', 'mean_absolute_error', 'median_absolute_error', 'r2']
+        Options for quantile regression:
+            ['pinball_loss']
         For more information on these options, see `sklearn.metrics`: https://scikit-learn.org/stable/modules/classes.html#sklearn-metrics-metrics
 
         You can also pass your own evaluation function here as long as it follows formatting of the functions defined in folder `autogluon.core.metrics`.
@@ -83,6 +87,7 @@ class AbstractModel:
                  hyperparameters=None,
                  feature_metadata: FeatureMetadata = None,
                  num_classes=None,
+                 quantile_levels=None,
                  stopping_metric=None,
                  features=None,
                  **kwargs):
@@ -91,6 +96,7 @@ class AbstractModel:
         self.path_root = path
         self.path = self.create_contexts(self.path_root + self.path_suffix)  # TODO: Make this path a function for consistency.
         self.num_classes = num_classes
+        self.quantile_levels = quantile_levels
         self.model = None
         self.problem_type = problem_type
         if eval_metric is not None:
@@ -464,7 +470,7 @@ class AbstractModel:
     def _predict_proba(self, X, **kwargs):
         X = self.preprocess(X, **kwargs)
 
-        if self.problem_type == REGRESSION:
+        if self.problem_type in [REGRESSION, QUANTILE]:
             return self.model.predict(X)
 
         y_pred_proba = self.model.predict_proba(X)
@@ -477,7 +483,12 @@ class AbstractModel:
         For multiclass and softclass classification, keeps y_pred_proba as a 2 dimensional array of prediction probabilities for each class.
         For regression, converts y_pred_proba to a 1 dimensional array of predictions.
         """
-        if self.problem_type == BINARY:
+        if self.problem_type == REGRESSION:
+            if len(y_pred_proba.shape) == 1:
+                return y_pred_proba
+            else:
+                return y_pred_proba[:, 1]
+        elif self.problem_type == BINARY:
             if len(y_pred_proba.shape) == 1:
                 return y_pred_proba
             elif y_pred_proba.shape[1] > 1:
@@ -486,17 +497,18 @@ class AbstractModel:
                 return y_pred_proba
         elif y_pred_proba.shape[1] > 2:  # Multiclass, Softclass
             return y_pred_proba
-        else:  # Regression
-            return y_pred_proba[:, 1]
+        else:  # Unknown problem type
+            raise AssertionError(f'Unknown y_pred_proba format for `problem_type="{self.problem_type}"`.')
 
     def score(self, X, y, metric=None, sample_weight=None, **kwargs):
         if metric is None:
             metric = self.eval_metric
-        if metric.needs_pred:
+
+        if metric.needs_pred or metric.needs_quantile:
             y_pred = self.predict(X=X, **kwargs)
         else:
             y_pred = self.predict_proba(X=X, **kwargs)
-        return compute_weighted_metric(y, y_pred, metric, sample_weight)
+        return compute_weighted_metric(y, y_pred, metric, sample_weight, quantile_levels=self.quantile_levels)
 
     def score_with_y_pred_proba(self, y, y_pred_proba, metric=None, sample_weight=None):
         if metric is None:
@@ -505,7 +517,7 @@ class AbstractModel:
             y_pred = get_pred_from_proba(y_pred_proba=y_pred_proba, problem_type=self.problem_type)
         else:
             y_pred = y_pred_proba
-        return compute_weighted_metric(y, y_pred, metric, sample_weight)
+        return compute_weighted_metric(y, y_pred, metric, sample_weight, quantile_levels=self.quantile_levels)
 
     def save(self, path: str = None, verbose=True) -> str:
         """
@@ -664,6 +676,7 @@ class AbstractModel:
             problem_type=self.problem_type,
             eval_metric=self.eval_metric,
             num_classes=self.num_classes,
+            quantile_levels=self.quantile_levels,
             stopping_metric=self.stopping_metric,
             model=None,
             hyperparameters=hyperparameters,
@@ -697,7 +710,7 @@ class AbstractModel:
         time_start = time.time()
         logger.log(15, "Starting generic AbstractModel hyperparameter tuning for %s model..." % self.name)
         self._set_default_searchspace()
-        params_copy = self.params.copy()
+        params_copy = self._get_params()
         directory = self.path  # also create model directory if it doesn't exist
         # TODO: This will break on S3. Use tabular/utils/savers for datasets, add new function
         scheduler_cls, scheduler_params = scheduler_options  # Unpack tuple
@@ -849,6 +862,7 @@ class AbstractModel:
             'stopping_metric': self.stopping_metric.name,
             'fit_time': self.fit_time,
             'num_classes': self.num_classes,
+            'quantile_levels': self.quantile_levels,
             'predict_time': self.predict_time,
             'val_score': self.val_score,
             'hyperparameters': self.params,
@@ -901,6 +915,14 @@ class AbstractModel:
         """
         return {}
 
+    @classmethod
+    def _get_default_ag_args_ensemble(cls) -> dict:
+        """
+        [Advanced] Dictionary of customization options related to meta properties of the model ensemble this model will be a child in.
+        Refer to hyperparameters of ensemble models for valid options.
+        """
+        return {}
+
     def _get_default_stopping_metric(self):
         """
         Returns the default stopping metric to use for early stopping.
@@ -913,6 +935,60 @@ class AbstractModel:
             stopping_metric = self.eval_metric
         stopping_metric = metrics.get_metric(stopping_metric, self.problem_type, 'stopping_metric')
         return stopping_metric
+
+    def _get_params(self) -> dict:
+        """Gets all params."""
+        return self.params.copy()
+
+    def _get_ag_params(self) -> dict:
+        """Gets params that are not passed to the inner model, but are used by the wrapper."""
+        ag_param_names = self._ag_params()
+        if ag_param_names:
+            return {key: val for key, val in self.params.items() if key in ag_param_names}
+        else:
+            return dict()
+
+    def _get_model_params(self) -> dict:
+        """Gets params that are passed to the inner model."""
+        ag_param_names = self._ag_params()
+        if ag_param_names:
+            return {key: val for key, val in self.params.items() if key not in ag_param_names}
+        else:
+            return self._get_params()
+
+    # TODO: Add documentation for valid args for each model. Currently only `ag.early_stop`
+    def _ag_params(self) -> set:
+        """
+        Set of params that are not passed to self.model, but are used by the wrapper.
+        For developers, this is purely optional and is just for convenience to logically distinguish between model specific parameters and added AutoGluon functionality.
+        The goal is to have common parameter names for useful functionality shared between models,
+        even if the functionality is not natively available as a parameter in the model itself or under a different name.
+
+        Below are common patterns / options to make available. Their actual usage and options in a particular model should be documented in the model itself, as it has flexibility to differ.
+
+        Possible params:
+
+        ag.early_stop : int, str, or tuple
+            generic name for early stopping logic. Typically can be an int or a str preset/strategy.
+            Also possible to pass tuple of (class, kwargs) to construct a custom early stopping object.
+                Refer to `autogluon.core.utils.early_stopping` for examples.
+
+        """
+        return set()
+
+    def _get_tags(self):
+        collected_tags = {}
+        for base_class in reversed(inspect.getmro(self.__class__)):
+            if hasattr(base_class, '_more_tags'):
+                # need the if because mixins might not have _more_tags
+                # but might do redundant work in estimators
+                # (i.e. calling more tags on BaseEstimator multiple times)
+                more_tags = base_class._more_tags(self)
+                collected_tags.update(more_tags)
+        return collected_tags
+
+    def _more_tags(self):
+        return _DEFAULT_TAGS
 
 
 class AbstractNeuralNetworkModel(AbstractModel):

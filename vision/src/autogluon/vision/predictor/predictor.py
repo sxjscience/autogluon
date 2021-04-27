@@ -1,16 +1,19 @@
 """Image Prediction task"""
 import copy
-import pickle
 import logging
-import warnings
 import os
+import pickle
+import warnings
 
+import numpy as np
 import pandas as pd
-from autogluon.core import Int, Categorical
-from autogluon.core.utils import verbosity2loglevel, get_gpu_count
-from autogluon.core.utils import set_logger_verbosity
 from gluoncv.auto.tasks import ImageClassification as _ImageClassification
 from gluoncv.model_zoo import get_model_list
+
+from autogluon.core.constants import MULTICLASS
+from autogluon.core.data.label_cleaner import LabelCleaner
+from autogluon.core.utils import set_logger_verbosity
+from autogluon.core.utils import verbosity2loglevel, get_gpu_count
 from ..configs.presets_configs import unpack, _check_gpu_memory_presets
 from ..utils import MXNetErrorCatcher
 
@@ -24,6 +27,8 @@ class ImagePredictor(object):
 
     Parameters
     ----------
+    label : str, default = 'label'
+        Name of the column that contains the target variable to predict.
     problem_type : str, default = None
         Type of prediction problem. Options: ('multiclass'). If problem_type = None, the prediction problem type is inferred
          based on the provided dataset. Currently only multiclass(or single class vs. background) classification is supported.
@@ -42,7 +47,7 @@ class ImagePredictor(object):
     # Dataset is a subclass of `pd.DataFrame`, with `image` and `label` columns.
     Dataset = _ImageClassification.Dataset
 
-    def __init__(self, problem_type=None, eval_metric=None, path=None, verbosity=2):
+    def __init__(self, label='label', problem_type=None, eval_metric=None, path=None, verbosity=2):
         self._problem_type = problem_type
         self._eval_metric = eval_metric
         if path is None:
@@ -50,7 +55,10 @@ class ImagePredictor(object):
         self._log_dir = path
         self._verbosity = verbosity
         self._classifier = None
+        self._label_cleaner = None
         self._fit_summary = {}
+        self._label = label
+        assert isinstance(self._label, str)
         os.makedirs(self._log_dir, exist_ok=True)
 
     @property
@@ -107,7 +115,8 @@ class ImagePredictor(object):
                         'model': Categorical('resnet50_v1b', 'resnet101_v1d', 'resnest200'),
                         'lr': Real(1e-5, 1e-2, log=True),
                         'batch_size': Categorical(8, 16, 32, 64, 128),
-                        'epochs': 200
+                        'epochs': 200,
+                        'early_stop_patience': -1
                         },
                     'hyperparameter_tune_kwargs': {
                         'num_trials': 1024,
@@ -121,7 +130,8 @@ class ImagePredictor(object):
                         'model': Categorical('resnet50_v1b', 'resnet34_v1b'),
                         'lr': Real(1e-4, 1e-2, log=True),
                         'batch_size': Categorical(8, 16, 32, 64, 128),
-                        'epochs': 150
+                        'epochs': 150,
+                        'early_stop_patience': 20
                         },
                     'hyperparameter_tune_kwargs': {
                         'num_trials': 512,
@@ -135,7 +145,8 @@ class ImagePredictor(object):
                         'model': 'resnet50_v1b',
                         'lr': 0.01,
                         'batch_size': 64,
-                        'epochs': 50
+                        'epochs': 50,
+                        'early_stop_patience': 5
                         },
                     'hyperparameter_tune_kwargs': {
                         'num_trials': 8,
@@ -151,6 +162,7 @@ class ImagePredictor(object):
                         'lr': Categorical(0.01, 0.005, 0.001),
                         'batch_size': Categorical(64, 128),
                         'epochs': Categorical(50, 100),
+                        'early_stop_patience': 10
                         },
                     'hyperparameter_tune_kwargs': {
                         'num_trials': 32,
@@ -174,6 +186,18 @@ class ImagePredictor(object):
                 Mini batch size
             lr : float
                 Trainer learning rate for optimization process.
+            early_stop_patience : int, default=10
+                Number of epochs with no improvement after which train is early stopped. Use `None` to disable.
+            early_stop_min_delta : float, default=1e-4
+                The small delta value to ignore when evaluating the metric. A large delta helps stablize the early
+                stopping strategy against tiny fluctuation, e.g. 0.5->0.49->0.48->0.499->0.500001 is still considered as
+                a good timing for early stopping.
+            early_stop_baseline : float, default=None
+                The minimum(baseline) value to trigger early stopping. For example, with `early_stop_baseline=0.5`,
+                early stopping won't be triggered if the metric is less than 0.5 even if plateau is detected.
+                Use `None` to disable.
+            early_stop_max_value : float, default=None
+                The max value for metric, early stop training instantly once the max value is achieved. Use `None` to disable.
             You can get the list of accepted hyperparameters in `config.yaml` saved by this predictor.
         **kwargs :
             holdout_frac : float, default = 0.1
@@ -202,7 +226,8 @@ class ImagePredictor(object):
         """
         if self._problem_type is None:
             # options: multiclass
-            self._problem_type = 'multiclass'
+            self._problem_type = MULTICLASS
+        assert self._problem_type in (MULTICLASS,), f"Invalid problem_type: {self._problem_type}"
         if self._eval_metric is None:
             # options: accuracy,
             self._eval_metric = 'accuracy'
@@ -215,9 +240,13 @@ class ImagePredictor(object):
         ngpus_per_trial = kwargs['ngpus_per_trial']
         holdout_frac = kwargs['holdout_frac']
         random_state = kwargs['random_state']
-        search_strategy = kwargs['hyperparameter_tune_kwargs']['search_strategy']
+        scheduler = kwargs['hyperparameter_tune_kwargs']['scheduler']
+        searcher = kwargs['hyperparameter_tune_kwargs']['searcher']
         max_reward = kwargs['hyperparameter_tune_kwargs']['max_reward']
         scheduler_options = kwargs['hyperparameter_tune_kwargs']['scheduler_options']
+        # deep copy to avoid inplace overwrite
+        train_data = copy.deepcopy(train_data)
+        tuning_data = copy.deepcopy(tuning_data)
 
         log_level = verbosity2loglevel(self._verbosity)
         set_logger_verbosity(self._verbosity, logger=logger)
@@ -261,6 +290,18 @@ class ImagePredictor(object):
             else:
                 valid_names = '\n'.join(names)
                 raise ValueError(f'`tuning_data` {tuning_data} is not among valid list {valid_names}')
+
+        # data sanity check
+        train_data = self._validate_data(train_data)
+        train_labels = _get_valid_labels(train_data)
+        self._label_cleaner = LabelCleaner.construct(problem_type=self._problem_type, y=train_labels, y_uncleaned=train_labels)
+        train_labels_cleaned = self._label_cleaner.transform(train_labels)
+        # converting to internal label set
+        _set_valid_labels(train_data, train_labels_cleaned)
+        if tuning_data is not None:
+            tuning_data = self._validate_data(tuning_data)
+            _set_valid_labels(tuning_data, self._label_cleaner.transform(_get_valid_labels(tuning_data)))
+
         if self._classifier is not None:
             logging.getLogger("ImageClassificationEstimator").propagate = True
             self._classifier._logger.setLevel(log_level)
@@ -275,11 +316,14 @@ class ImagePredictor(object):
         if time_limit is None and num_trials is None:
             raise ValueError('`time_limit` and `num_trials` can not be `None` at the same time, '
                              'otherwise the training will not be terminated gracefully.')
-        config={'log_dir': self._log_dir,
-                'num_trials': 99999 if num_trials is None else max(1, num_trials),
-                'time_limits': 2147483647 if time_limit is None else max(1, time_limit),
-                'search_strategy': search_strategy,
-                }
+        config = {'log_dir': self._log_dir,
+                  'num_trials': 99999 if num_trials is None else max(1, num_trials),
+                  'time_limits': 2147483647 if time_limit is None else max(1, time_limit),
+                  'searcher': searcher,
+                  # needed for gluon-cv TODO: remove after gluon-cv is updated https://github.com/dmlc/gluon-cv/issues/1633
+                  'search_strategy': searcher,
+                  'scheduler': scheduler,
+                  }
         if max_reward is not None:
             config['max_reward'] = max_reward
         if nthreads_per_trial is not None:
@@ -305,12 +349,24 @@ class ImagePredictor(object):
             config.update(scheduler_options)
         if use_rec == True:
             config['use_rec'] = True
+        if 'early_stop_patience' not in config:
+            config['early_stop_patience'] = 10
+        if config['early_stop_patience'] == None:
+            config['early_stop_patience'] = -1
+        # TODO(zhreshold): expose the transform function(or sign function) for converting custom metrics
+        if 'early_stop_baseline' not in config or config['early_stop_baseline'] == None:
+            config['early_stop_baseline'] = -np.Inf
+        if 'early_stop_max_value' not in config or config['early_stop_max_value'] == None:
+            config['early_stop_max_value'] = np.Inf
         # verbosity
         if log_level > logging.INFO:
             logging.getLogger('gluoncv.auto.tasks.image_classification').propagate = False
             logging.getLogger("ImageClassificationEstimator").propagate = False
             logging.getLogger("ImageClassificationEstimator").setLevel(log_level)
         task = _ImageClassification(config=config)
+        # GluonCV can't handle these separately - patching created config
+        task.search_strategy = scheduler
+        task.scheduler_options['searcher'] = searcher
         task._logger.setLevel(log_level)
         task._logger.propagate = True
         with warnings.catch_warnings(record=True) as w:
@@ -325,6 +381,48 @@ class ImagePredictor(object):
         if hasattr(task, 'fit_history'):
             self._fit_summary['fit_history'] = task.fit_history()
         return self
+
+    def _validate_data(self, data):
+        """Check whether data is valid, try to convert with best effort if not"""
+        if isinstance(data, pd.DataFrame):
+            # TODO(zhreshold): allow custom label column without this renaming trick
+            if self._label != 'label' and self._label in data.columns:
+                # data is deepcopied so it's okay to overwrite directly
+                data = data.rename(columns={'label': '_unused_label', self._label: 'label'}, errors='ignore')
+
+        if not (hasattr(data, 'classes') and hasattr(data, 'to_mxnet')):
+            if isinstance(data, pd.DataFrame):
+                # raw dataframe, try to add metadata automatically
+                if 'label' in data.columns and 'image' in data.columns:
+                    # check image relative/abs path is valid
+                    sample = data.iloc[0]['image']
+                    if not os.path.isfile(sample):
+                        raise OSError(f'Detected invalid image path `{sample}`, please ensure all image paths are absolute or you are using the right working directory.')
+                    logger.log(20, 'Converting raw DataFrame to ImagePredictor.Dataset...')
+                    infer_classes = sorted(data.label.unique().tolist())
+                    logger.log(20, f'Detected {len(infer_classes)} unique classes: {infer_classes}')
+                    instruction = 'train_data = ImagePredictor.Dataset(train_data, classes=["foo", "bar"])'
+                    logger.log(20, f'If you feel the `classes` is inaccurate, please construct the dataset explicitly, e.g. {instruction}')
+                    data = _ImageClassification.Dataset(data, classes=infer_classes)
+                else:
+                    err_msg = 'Unable to convert raw DataFrame to ImagePredictor Dataset, ' + \
+                              '`image` and `label` columns are required.' + \
+                              'You may visit `https://auto.gluon.ai/stable/tutorials/image_prediction/dataset.html` ' + \
+                              'for details.'
+                    raise AttributeError(err_msg)
+            else:
+                raise TypeError(f"Unable to process dataset of type: {type(data)}")
+        elif isinstance(data, _ImageClassification.Dataset):
+            assert 'label' in data.columns
+            assert hasattr(data, 'classes')
+            # check whether classes are outdated, no action required if all unique labels is subset of `classes`
+            unique_labels = sorted(data['label'].unique().tolist())
+            if not (all(ulabel in data.classes for ulabel in unique_labels)):
+                data = _ImageClassification.Dataset(data, classes=unique_labels)
+                logger.log(20, f'Reset labels to {unique_labels}')
+        if len(data) < 1:
+            raise ValueError('Empty dataset.')
+        return data
 
     def _validate_kwargs(self, kwargs):
         """validate and initialize default kwargs"""
@@ -341,9 +439,12 @@ class ImagePredictor(object):
         # tune kwargs
         hpo_tune_args = kwargs.get('hyperparameter_tune_kwargs', {})
         hpo_tune_args['num_trials'] = hpo_tune_args.get('num_trials', 1)
-        hpo_tune_args['search_strategy'] = hpo_tune_args.get('search_strategy', 'random')
-        if not hpo_tune_args['search_strategy'] in ('random', 'bayesopt', 'grid'):
-            raise ValueError(f"Invalid search strategy: {hpo_tune_args['search_strategy']}, supported: ('random', 'bayesopt', 'grid')")
+        hpo_tune_args['searcher'] = hpo_tune_args.get('searcher', 'random')
+        if not hpo_tune_args['searcher'] in ('random', 'bayesopt', 'grid'):
+            raise ValueError(f"Invalid searcher: {hpo_tune_args['searcher']}, supported: ('random', 'bayesopt', 'grid')")
+        hpo_tune_args['scheduler'] = hpo_tune_args.get('scheduler', 'local')
+        if not hpo_tune_args['scheduler'] in ('fifo', 'local'):
+            raise ValueError(f"Invalid searcher: {hpo_tune_args['searcher']}, supported: ('fifo', 'local')")
         hpo_tune_args['max_reward'] = hpo_tune_args.get('max_reward', None)
         if hpo_tune_args['max_reward'] is not None and hpo_tune_args['max_reward'] < 0:
             raise ValueError(f"Expected `max_reward` to be a positive float number between 0 and 1.0, given {hpo_tune_args['max_reward']}")
@@ -372,14 +473,20 @@ class ImagePredictor(object):
         """
         if self._classifier is None:
             raise RuntimeError('Classifier is not initialized, try `fit` first.')
-        proba = self._classifier.predict(data)
-        if 'image' in proba.columns:
-            ret = proba.groupby(["image"]).agg(list)
-        ret = proba
+        assert self._label_cleaner is not None
+        y_pred_proba = self._classifier.predict(data, with_proba=True)
+        if isinstance(data, pd.DataFrame) and 'image' in data:
+            idx_to_image_map = data[['image']]
+            idx_to_image_map = idx_to_image_map.reset_index(drop=False)
+            y_pred_proba = idx_to_image_map.merge(y_pred_proba, on='image')
+            y_pred_proba = y_pred_proba.set_index('index').rename_axis(None)
+        y_pred_proba[list(self._label_cleaner.cat_mappings_dependent_var.values())] = y_pred_proba['image_proba'].to_list()
+        ret = y_pred_proba.drop(['image', 'image_proba'], axis=1, errors='ignore')
+
         if as_pandas:
             return ret
         else:
-            return ret.as_numpy()
+            return ret.to_numpy()
 
     def predict(self, data, as_pandas=True):
         """Predict images as a whole, return labels(class category).
@@ -401,17 +508,25 @@ class ImagePredictor(object):
         """
         if self._classifier is None:
             raise RuntimeError('Classifier is not initialized, try `fit` first.')
+        assert self._label_cleaner is not None
         proba = self._classifier.predict(data)
         if 'image' in proba.columns:
             # multiple images
-            ret = proba.loc[proba.groupby(["image"])["score"].idxmax()].reset_index(drop=True)
+            assert isinstance(data, pd.DataFrame) and 'image' in data.columns
+            y_pred = proba.loc[proba.groupby(["image"])["score"].idxmax()].reset_index(drop=True)
+            idx_to_image_map = data[['image']]
+            idx_to_image_map = idx_to_image_map.reset_index(drop=False)
+            y_pred = idx_to_image_map.merge(y_pred, on='image')
+            y_pred = y_pred.set_index('index').rename_axis(None)
+            ret = self._label_cleaner.inverse_transform(y_pred['id'].rename('label'))
         else:
             # single image
             ret = proba.loc[[proba["score"].idxmax()]]
+            ret = self._label_cleaner.inverse_transform(ret['id'].rename('label'))
         if as_pandas:
             return ret
         else:
-            return ret.as_numpy()
+            return ret.to_numpy()
 
     def predict_feature(self, data, as_pandas=True):
         """Predict images visual feature representations, return the features as numpy (1xD) vector.
@@ -437,7 +552,7 @@ class ImagePredictor(object):
         if as_pandas:
             return ret
         else:
-            return ret.as_numpy()
+            return ret.to_numpy()
 
     def evaluate(self, data):
         """Evaluate model performance on validation data.
@@ -513,6 +628,28 @@ class ImagePredictor(object):
         """
         return tuple(_SUPPORTED_MODELS)
 
+
+def _get_valid_labels(data):
+    ret = None
+    if isinstance(data, pd.DataFrame):
+        ret = data['label']
+    else:
+        from d8.image_classification import Dataset as D8D
+        if isinstance(data, D8D):
+            ret = data.df['class_name']
+    if ret is None:
+        raise ValueError('Dataset must be pandas.DataFrame or d8.image_classification.Dataset')
+    return ret
+
+def _set_valid_labels(data, label):
+    if isinstance(data, pd.DataFrame):
+        data['label'] = label
+    else:
+        from d8.image_classification import Dataset as D8D
+        if isinstance(data, D8D):
+            data.df['class_name'] = label
+        else:
+            raise ValueError('Dataset must be pandas.DataFrame or d8.image_classification.Dataset')
 
 def _get_supported_models():
     all_models = get_model_list()
