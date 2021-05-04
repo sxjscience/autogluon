@@ -21,7 +21,7 @@ from mxnet.lr_scheduler import PolyScheduler, CosineScheduler
 from mxnet.gluon.data import DataLoader
 from autogluon_contrib_nlp.models import get_backbone
 from autogluon_contrib_nlp.lr_scheduler import InverseSquareRootScheduler
-from autogluon_contrib_nlp.utils.config import CfgNode
+from ..config import CfgNode
 from autogluon_contrib_nlp.utils.misc import grouper, \
     count_parameters, repeat, get_mxnet_available_ctx
 from autogluon_contrib_nlp.utils.parameter import move_to_ctx, clip_grad_global_norm
@@ -43,7 +43,6 @@ from .modules import MultiModalWithPretrainedTextNN
 from .preprocessing import MultiModalTextFeatureProcessor, base_preprocess_cfg,\
     MultiModalTextBatchify, get_stats_string, auto_shrink_max_length, get_cls_sep_id
 from .utils import average_checkpoints, set_seed
-from .. import constants as _C
 from ..utils import logging_config
 from ..presets import ag_text_presets
 from ... import version
@@ -118,6 +117,8 @@ def apply_layerwise_decay(model, layerwise_decay, backbone_name, not_included=No
         The backbone model
     layerwise_decay: int
         layer-wise decay power
+    backbone_name: str
+        Name of the backbone
     not_included: list of str
         A list or parameter names that not included in the layer-wise decay
     """
